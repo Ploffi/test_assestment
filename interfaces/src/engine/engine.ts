@@ -53,7 +53,7 @@ import { createInMemoryAggregationStore } from '../utility/aggregation-store.js'
 import { createInMemoryScheduledStore } from '../utility/scheduled-store.js';
 import { parseDuration } from './duration.js';
 import { canonicalJson } from './canonical.js';
-import { buildAdapter } from './adapter.js';
+import { attachIntegrationCallContext, buildAdapter } from './adapter.js';
 
 interface Registry {
   predicates: Map<string, RegisteredPredicate<string, any>>;
@@ -86,6 +86,7 @@ class EngineImpl implements RuleEngine {
   private registry: Registry | null = null;
   private subs: Map<string, Set<(p: any) => void>> = new Map();
   private inflight = new Set<Promise<unknown>>();
+  private evalControllers = new Set<AbortController>();
   private started = false;
   private stopped = false;
   private schedTimer: Timer | null = null;
@@ -142,10 +143,22 @@ class EngineImpl implements RuleEngine {
     for (const i of batch.integrations ?? []) addUnique(reg.integrations, i, 'integration');
     for (const r of batch.rules ?? []) addUnique(reg.rules, r, 'rule');
 
-    // Build unified action lookup
-    for (const a of reg.actions.values()) reg.actionByName.set(a.name, a);
-    for (const a of reg.aggregatedActions.values()) reg.actionByName.set(a.name, a);
-    for (const a of reg.scheduledActions.values()) reg.actionByName.set(a.name, a);
+    // Build unified action lookup. Rule attachments are by name only, so names
+    // must be globally unique across the three action kinds.
+    const addActionLookup = (a: AnyRegisteredAction): void => {
+      if (reg.actionByName.has(a.name)) {
+        issues.push({
+          code: 'duplicate-name',
+          entity: { kind: a.kind, name: a.name },
+          message: `duplicate action name across action kinds: ${a.name}`,
+        });
+        return;
+      }
+      reg.actionByName.set(a.name, a);
+    };
+    for (const a of reg.actions.values()) addActionLookup(a);
+    for (const a of reg.aggregatedActions.values()) addActionLookup(a);
+    for (const a of reg.scheduledActions.values()) addActionLookup(a);
 
     // Pass 1: dependency graph + cross-references
     for (const r of reg.rules.values()) {
@@ -240,12 +253,12 @@ class EngineImpl implements RuleEngine {
       schema: z.ZodType<any> | undefined,
       pinned: unknown,
       entity: RegistrationIssue['entity'],
+      partial: boolean,
     ) => {
       if (!schema || typeof (schema as any).safeParse !== 'function') return;
-      // Pinned args are Partial<Args> — registration may supply only some keys
-      // and the remainder come from use-site args at evaluate time. Validate
-      // against the partial schema so missing required keys don't fail here.
-      const partialed = typeof (schema as any).partial === 'function'
+      // Predicate/action pinned args are Partial<Args>; rule args have no
+      // use-site merge later and must be complete at registration time.
+      const partialed = partial && typeof (schema as any).partial === 'function'
         ? (schema as any).partial()
         : schema;
       const result = (partialed as any).safeParse(pinned ?? {});
@@ -264,19 +277,19 @@ class EngineImpl implements RuleEngine {
     };
 
     for (const p of reg.predicates.values()) {
-      validateArgs(p.argsSchema, p.pinnedArgs, { kind: 'predicate', name: p.name });
+      validateArgs(p.argsSchema, p.pinnedArgs, { kind: 'predicate', name: p.name }, true);
     }
     for (const a of reg.actions.values()) {
-      validateArgs(a.argsSchema, a.pinnedArgs, { kind: 'action', name: a.name });
+      validateArgs(a.argsSchema, a.pinnedArgs, { kind: 'action', name: a.name }, true);
     }
     for (const a of reg.aggregatedActions.values()) {
-      validateArgs(a.argsSchema, a.pinnedArgs, { kind: 'aggregatedAction', name: a.name });
+      validateArgs(a.argsSchema, a.pinnedArgs, { kind: 'aggregatedAction', name: a.name }, true);
     }
     for (const a of reg.scheduledActions.values()) {
-      validateArgs(a.argsSchema, a.pinnedArgs, { kind: 'scheduledAction', name: a.name });
+      validateArgs(a.argsSchema, a.pinnedArgs, { kind: 'scheduledAction', name: a.name }, true);
     }
     for (const r of reg.rules.values()) {
-      if (r.argsSchema) validateArgs(r.argsSchema, r.pinnedArgs, { kind: 'rule', name: r.name });
+      if (r.argsSchema) validateArgs(r.argsSchema, r.pinnedArgs, { kind: 'rule', name: r.name }, false);
     }
 
     if (issues.length) throw new RegistrationError(issues);
@@ -293,7 +306,10 @@ class EngineImpl implements RuleEngine {
 
     // Build adapters
     for (const i of reg.integrations.values()) {
-      reg.adapters[i.name] = buildAdapter(i as RegisteredIntegration<string, IntegrationMethods>);
+      reg.adapters[i.name] = buildAdapter(i as RegisteredIntegration<string, IntegrationMethods>, {
+        clock: this.clock,
+        emit: (event) => this.emit('external.call', event),
+      });
     }
 
     this.registry = reg;
@@ -362,7 +378,14 @@ class EngineImpl implements RuleEngine {
       const leaseMs = Math.max(this.schedPollMs * 2, 30_000);
       const claimed = await this.schedStore.claim(now, 100, leaseMs);
       for (const rec of claimed) {
-        await this.runScheduledCheck(rec);
+        try {
+          await this.runScheduledCheck(rec);
+        } catch (err) {
+          this.emit('evaluation.failed', {
+            deliveryId: `scheduler:${rec.ruleId}:${rec.keyId}`,
+            error: err,
+          });
+        }
       }
     } catch (err) {
       this.emit('evaluation.failed', { deliveryId: 'scheduler', error: err });
@@ -372,6 +395,9 @@ class EngineImpl implements RuleEngine {
   async stop(): Promise<void> {
     this.stopped = true;
     this.started = false;
+    for (const controller of this.evalControllers) {
+      try { controller.abort(new Error('engine stopped')); } catch { /* */ }
+    }
     if (this.schedTimer) {
       this.schedTimer.cancel();
       this.schedTimer = null;
@@ -401,6 +427,7 @@ class EngineImpl implements RuleEngine {
     const startedAt = this.clock.now();
 
     const controller = new AbortController();
+    this.evalControllers.add(controller);
     const watchdog = this.clock.setTimeout(() => {
       try { controller.abort(new Error('evaluation timeout')); } catch { /* */ }
     }, this.evalTimeoutMs);
@@ -443,6 +470,7 @@ class EngineImpl implements RuleEngine {
       this.emit('evaluation.failed', { deliveryId, error: err });
       throw err;
     } finally {
+      this.evalControllers.delete(controller);
       watchdog.cancel();
       if (opts?.signal && userAbortHandler) {
         opts.signal.removeEventListener('abort', userAbortHandler);
@@ -463,12 +491,14 @@ class EngineImpl implements RuleEngine {
     let matchedCount = 0;
 
     for (const rule of rules) {
+      this.throwIfAborted(signal);
       const ruleStartedAt = this.clock.now();
       const ruleArgs = (rule.pinnedArgs ?? {}) as Record<string, unknown>;
-      const baseCtx = this.makeBaseCtx(envelope, deliveryId, startedAt, signal, registry, ruleArgs);
+      const baseCtx = this.makeBaseCtx(envelope, deliveryId, startedAt, signal, registry, ruleArgs, rule.name);
       let whenResult = true;
       if (rule.when !== undefined) {
         whenResult = await this.evaluateWhen(rule.when, baseCtx, memo, registry, deliveryId);
+        this.throwIfAborted(signal);
       }
       if (!whenResult) {
         this.emit('rule.skipped', { deliveryId, ruleId: rule.name, reason: 'when-false' });
@@ -478,12 +508,14 @@ class EngineImpl implements RuleEngine {
       const strat = rule.strategy as RuleStrategy;
 
       if (strat.kind === 'plain') {
+        this.throwIfAborted(signal);
         matchedCount++;
         this.emit('rule.matched', { deliveryId, ruleId: rule.name, elapsedMs: this.clock.now() - ruleStartedAt });
         for (const att of rule.actions) {
           this.queuePlainAction(pending, rule, att, baseCtx, registry);
         }
       } else if (strat.kind === 'aggregate') {
+        this.throwIfAborted(signal);
         const keyId = strat.key(baseCtx);
         const at = strat.at ? strat.at(baseCtx) : baseCtx.now;
         const windowMs = parseDuration(strat.window);
@@ -495,6 +527,7 @@ class EngineImpl implements RuleEngine {
           if (action.kind === 'aggregatedAction') {
             const agg = action as RegisteredAggregatedAction<string, WebhookEventName, any, any>;
             const payload = agg.transform(baseCtx);
+            this.throwIfAborted(signal);
             const entry = { at, deliveryId, payload };
             let count: number;
             if (typeof this.aggStore.appendAndCount === 'function') {
@@ -529,6 +562,7 @@ class EngineImpl implements RuleEngine {
           this.emit('rule.skipped', { deliveryId, ruleId: rule.name, reason: 'aggregate-below-threshold' });
         }
       } else if (strat.kind === 'schedule') {
+        this.throwIfAborted(signal);
         const keyId = strat.key(baseCtx);
         const payload = strat.transform(baseCtx);
         const now = this.clock.now();
@@ -542,6 +576,7 @@ class EngineImpl implements RuleEngine {
 
     // Run all queued actions in parallel with isolation
     if (pending.length > 0) {
+      this.throwIfAborted(signal);
       const settled = await Promise.allSettled(pending.map((p) => p.fn()));
       const errors: unknown[] = [];
       for (const s of settled) {
@@ -563,6 +598,32 @@ class EngineImpl implements RuleEngine {
     return { matchedCount };
   }
 
+  private throwIfAborted(signal: AbortSignal): void {
+    if (!signal.aborted) return;
+    const reason = (signal as any).reason;
+    throw reason instanceof Error ? reason : new Error('aborted');
+  }
+
+  private scopedLogger(bindings: object): Logger {
+    return this.logger.child(bindings);
+  }
+
+  private bindIntegrations(
+    registry: Registry,
+    deliveryId: string,
+  ): Record<string, IntegrationAdapter<IntegrationMethods>> {
+    const out: Record<string, IntegrationAdapter<IntegrationMethods>> = {};
+    for (const [integrationName, adapter] of Object.entries(registry.adapters)) {
+      const methods: Record<string, (input: any) => Promise<any>> = {};
+      for (const [methodName, fn] of Object.entries(adapter)) {
+        methods[methodName] = (input: any) =>
+          fn(attachIntegrationCallContext(input, { deliveryId }));
+      }
+      out[integrationName] = methods as IntegrationAdapter<IntegrationMethods>;
+    }
+    return out;
+  }
+
   private makeBaseCtx(
     envelope: EventEnvelope,
     deliveryId: string,
@@ -570,16 +631,26 @@ class EngineImpl implements RuleEngine {
     signal: AbortSignal,
     registry: Registry,
     args: any,
+    ruleId?: string,
   ): BaseCtx<AnyEventPayload, any> {
     const payload: any = envelope.payload ?? {};
+    const loggerBindings: Record<string, unknown> = { deliveryId };
+    if (ruleId !== undefined) loggerBindings.ruleId = ruleId;
+    if (payload?.installation?.id !== undefined) loggerBindings.installation = { id: payload.installation.id };
+    if (payload?.repository) {
+      loggerBindings.repo = {
+        id: payload.repository.id ?? 0,
+        fullName: payload.repository.full_name ?? '',
+      };
+    }
     const ctx: BaseCtx<AnyEventPayload, any> = {
       event: payload,
       args,
       signal,
       deliveryId,
       now: startedAt,
-      logger: this.logger,
-      integrations: registry.adapters,
+      logger: this.scopedLogger(loggerBindings),
+      integrations: this.bindIntegrations(registry, deliveryId),
     };
     if (payload?.installation?.id !== undefined) {
       ctx.installation = { id: payload.installation.id };
@@ -642,62 +713,88 @@ class EngineImpl implements RuleEngine {
   ): Promise<boolean> {
     const pred = registry.predicates.get(ref.name);
     if (!pred) return false;
+    const startedAt = this.clock.now();
+    let merged: Record<string, unknown> = {};
+    const pinnedFailOpen = (pred.pinnedArgs as any)?.failOpen === true;
+    const useSiteFailOpen = (ref.args as any)?.failOpen === true;
+    const fail = (err: unknown): boolean => {
+      try {
+        ctx.logger.warn({ err, predicateName: ref.name }, 'predicate evaluated as false');
+      } catch { /* logger failures must not break predicate isolation */ }
+      return pinnedFailOpen || useSiteFailOpen || merged.failOpen === true;
+    };
 
-    // Resolve use-site args: evaluate (ctx)=>value callbacks against rule ctx.
-    const useArgs: Record<string, unknown> = {};
-    for (const k of Object.keys(ref.args ?? {})) {
-      const v = (ref.args as any)[k];
-      useArgs[k] = typeof v === 'function' ? v(ctx) : v;
-    }
-    // Merge: registration > use-site
-    const merged = { ...useArgs };
-    for (const k of Object.keys(pred.pinnedArgs ?? {})) {
-      const v = (pred.pinnedArgs as any)[k];
-      if (v !== undefined) merged[k] = v;
-    }
+    try {
+      // Resolve use-site args: evaluate (ctx)=>value callbacks against rule ctx.
+      const useArgs: Record<string, unknown> = {};
+      for (const k of Object.keys(ref.args ?? {})) {
+        const v = (ref.args as any)[k];
+        useArgs[k] = typeof v === 'function' ? v(ctx) : v;
+      }
+      // Merge: registration > use-site
+      merged = { ...useArgs };
+      for (const k of Object.keys(pred.pinnedArgs ?? {})) {
+        const v = (pred.pinnedArgs as any)[k];
+        if (v !== undefined) merged[k] = v;
+      }
 
-    const hash = canonicalJson(merged);
-    const key = `${ref.name}@${hash}`;
-    const cached = memo.get(key);
-    if (cached) {
+      const hash = canonicalJson(merged);
+      const key = `${ref.name}@${hash}`;
+      const cached = memo.get(key);
+      if (cached) {
+        const result = await cached.promise;
+        this.emit('predicate.evaluated', {
+          deliveryId,
+          predicateName: ref.name,
+          result,
+          elapsedMs: 0,
+          cached: true,
+        });
+        return result;
+      }
+
+      const promise = (async (): Promise<boolean> => {
+        let argsForFn: any = merged;
+        if (pred.argsSchema && typeof (pred.argsSchema as any).safeParse === 'function') {
+          const result = (pred.argsSchema as any).safeParse(merged);
+          if (result.success) argsForFn = result.data;
+          else return fail(result.error);
+        }
+        const predCtx: BaseCtx<AnyEventPayload, any> = {
+          ...ctx,
+          args: argsForFn,
+          logger: ctx.logger.child({ predicateName: ref.name }),
+        };
+        try {
+          return !!(await pred.fn(predCtx));
+        } catch (err) {
+          return fail(err);
+        }
+      })();
+
+      const slot: MemoSlot = { promise };
+      memo.set(key, slot);
+
+      const result = await promise;
       this.emit('predicate.evaluated', {
         deliveryId,
         predicateName: ref.name,
-        result: false,
-        elapsedMs: 0,
-        cached: true,
+        result,
+        elapsedMs: this.clock.now() - startedAt,
+        cached: false,
       });
-      return cached.promise;
+      return result;
+    } catch (err) {
+      const result = fail(err);
+      this.emit('predicate.evaluated', {
+        deliveryId,
+        predicateName: ref.name,
+        result,
+        elapsedMs: this.clock.now() - startedAt,
+        cached: false,
+      });
+      return result;
     }
-
-    const startedAt = this.clock.now();
-    const promise = (async (): Promise<boolean> => {
-      let argsForFn: any = merged;
-      if (pred.argsSchema && typeof (pred.argsSchema as any).safeParse === 'function') {
-        const result = (pred.argsSchema as any).safeParse(merged);
-        if (result.success) argsForFn = result.data;
-        else return false;
-      }
-      const predCtx: BaseCtx<AnyEventPayload, any> = { ...ctx, args: argsForFn };
-      try {
-        return !!(await pred.fn(predCtx));
-      } catch {
-        return false;
-      }
-    })();
-
-    const slot: MemoSlot = { promise };
-    memo.set(key, slot);
-
-    const result = await promise;
-    this.emit('predicate.evaluated', {
-      deliveryId,
-      predicateName: ref.name,
-      result,
-      elapsedMs: this.clock.now() - startedAt,
-      cached: false,
-    });
-    return result;
   }
 
   private queuePlainAction(
@@ -715,7 +812,11 @@ class EngineImpl implements RuleEngine {
     pending.push({
       fn: async () => {
         const mergedArgs = this.mergeActionArgs(plain.pinnedArgs, att.args, baseCtx, plain.argsSchema);
-        const ctx = { ...baseCtx, args: mergedArgs };
+        const ctx = {
+          ...baseCtx,
+          args: mergedArgs,
+          logger: baseCtx.logger.child({ actionName: plain.name }),
+        };
         await plain.fn(ctx);
       },
     });
@@ -739,6 +840,7 @@ class EngineImpl implements RuleEngine {
         const aggCtx: AggregatedCtx<WebhookEventName, any> = {
           ...baseCtx,
           args: mergedArgs,
+          logger: baseCtx.logger.child({ actionName: agg.name }),
           aggregate: {
             entries: entries.map((e) => ({ at: e.at, deliveryId: e.deliveryId, payload: e.payload })),
             count: entries.length,
@@ -770,6 +872,7 @@ class EngineImpl implements RuleEngine {
     if (schema && typeof (schema as any).safeParse === 'function') {
       const r = (schema as any).safeParse(merged);
       if (r.success) return r.data;
+      throw r.error;
     }
     return merged;
   }
@@ -800,13 +903,23 @@ class EngineImpl implements RuleEngine {
       signal: controller.signal,
       deliveryId: `scheduler:${rec.ruleId}:${rec.keyId}`,
       now: ranAt,
-      logger: this.logger,
-      integrations: registry.adapters,
+      logger: this.logger.child({ deliveryId: `scheduler:${rec.ruleId}:${rec.keyId}`, ruleId: rec.ruleId }),
+      integrations: this.bindIntegrations(registry, `scheduler:${rec.ruleId}:${rec.keyId}`),
     };
 
     let result: CheckResult;
     try {
-      result = await strat.check(checkCtx);
+      const abortPromise = new Promise<never>((_, reject) => {
+        if (controller.signal.aborted) {
+          reject(new Error('aborted'));
+          return;
+        }
+        controller.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      });
+      abortPromise.catch(() => {});
+      const checkPromise = Promise.resolve(strat.check(checkCtx));
+      checkPromise.catch(() => {});
+      result = await Promise.race([checkPromise, abortPromise]);
     } catch {
       result = { kind: 'skip' };
     } finally {
@@ -814,7 +927,6 @@ class EngineImpl implements RuleEngine {
     }
 
     if (result.kind === 'pass') {
-      await this.schedStore.remove(rec.ruleId, rec.keyId);
       const baseCtx = this.makeBaseCtx(
         { name: rule.eventName, payload: {} as any, deliveryId: checkCtx.deliveryId },
         checkCtx.deliveryId,
@@ -822,6 +934,7 @@ class EngineImpl implements RuleEngine {
         controller.signal,
         registry,
         rule.pinnedArgs,
+        rule.name,
       );
       const scheduledView = {
         payload: rec.payload,
@@ -843,7 +956,7 @@ class EngineImpl implements RuleEngine {
                 signal: baseCtx.signal,
                 deliveryId: baseCtx.deliveryId,
                 now: baseCtx.now,
-                logger: baseCtx.logger,
+                logger: baseCtx.logger.child({ actionName: sched.name }),
                 integrations: baseCtx.integrations,
                 scheduled: scheduledView,
               };
@@ -855,7 +968,12 @@ class EngineImpl implements RuleEngine {
           pending.push({
             fn: async () => {
               const mergedArgs = this.mergeActionArgs(plain.pinnedArgs, att.args, baseCtx, plain.argsSchema);
-              const ctx = { ...baseCtx, args: mergedArgs, scheduled: scheduledView } as any;
+              const ctx = {
+                ...baseCtx,
+                args: mergedArgs,
+                logger: baseCtx.logger.child({ actionName: plain.name }),
+                scheduled: scheduledView,
+              } as any;
               await plain.fn(ctx);
             },
           });
@@ -864,11 +982,10 @@ class EngineImpl implements RuleEngine {
       const settled = await Promise.allSettled(pending.map((p) => p.fn()));
       const errors = settled.filter((s) => s.status === 'rejected').map((s) => (s as PromiseRejectedResult).reason);
       if (errors.length) {
-        this.emit('evaluation.failed', {
-          deliveryId: checkCtx.deliveryId,
-          error: errors.length === 1 ? errors[0] : new AggregateError(errors as Error[], 'scheduled actions failed'),
-        });
+        if (errors.length === 1) throw errors[0];
+        throw new AggregateError(errors as Error[], 'scheduled actions failed');
       }
+      await this.schedStore.remove(rec.ruleId, rec.keyId);
       this.emit('scheduled.checked', {
         ruleId: rec.ruleId,
         keyId: rec.keyId,

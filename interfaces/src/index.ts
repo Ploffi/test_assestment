@@ -1,4 +1,4 @@
-/* Package root — exports the public surface. Internal types live under
- * `./internal` and are only imported by engine implementation code. */
+/* Package root — exports the runtime DSL/engine plus the public type surface. */
 
 export * from './public/index.js';
+export * from './engine/index.js';

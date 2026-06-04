@@ -53,7 +53,11 @@ describe('task.md #1 — PR opened, main, non-core, touches infra/', () => {
 
     const touchesPaths = predicate('touches_paths')
       .args(z.object({ glob: z.string() }))
-      .fn(async (ctx) => ctx.args.glob === 'infra/**');
+      .fn(async (ctx) => {
+        const prefix = ctx.args.glob.replace(/\*\*$/, '');
+        const files = ((ctx.event as any).pull_request.files ?? []) as Array<{ filename: string }>;
+        return files.some((file) => file.filename.startsWith(prefix));
+      });
 
     const r = rule('notify-infra-outsider')
       .on('pull_request.opened')
@@ -87,6 +91,7 @@ describe('task.md #1 — PR opened, main, non-core, touches infra/', () => {
         pull_request: {
           base: { ref: 'main' },
           user: { login: 'mallory' }, // not 'alice'
+          files: [{ filename: 'infra/terraform/main.tf' }],
         },
       } as any),
     );
@@ -100,6 +105,7 @@ describe('task.md #1 — PR opened, main, non-core, touches infra/', () => {
         pull_request: {
           base: { ref: 'main' },
           user: { login: 'alice' }, // core team
+          files: [{ filename: 'infra/terraform/main.tf' }],
         },
       } as any),
     );
@@ -113,6 +119,21 @@ describe('task.md #1 — PR opened, main, non-core, touches infra/', () => {
         pull_request: {
           base: { ref: 'develop' },
           user: { login: 'mallory' },
+          files: [{ filename: 'infra/terraform/main.tf' }],
+        },
+      } as any),
+    );
+    expect(recorded).not.toHaveBeenCalled();
+  });
+
+  test('negative — main branch outsider but no infra/ paths → does NOT fire', async () => {
+    const { engine, recorded } = build();
+    await engine.evaluate(
+      fakeEnvelope('pull_request.opened', {
+        pull_request: {
+          base: { ref: 'main' },
+          user: { login: 'mallory' },
+          files: [{ filename: 'docs/readme.md' }],
         },
       } as any),
     );
@@ -232,7 +253,7 @@ describe('task.md #2 — 3 failing CI runs within 1h on same PR', () => {
 
     const clock = createManualClock(0);
     const engine = createEngine({
-      aggregationStore: createInMemoryAggregationStore(),
+      aggregationStore: createInMemoryAggregationStore({ clock }),
       clock,
     });
     engine.register({ aggregatedActions: [recordAction({})], rules: [r()] });
@@ -272,8 +293,9 @@ describe('task.md #2 — 3 failing CI runs within 1h on same PR', () => {
  * ============================================================ */
 
 describe('task.md #3 — issue.closed if not reopened in 5m', () => {
-  function build(reopened: boolean) {
+  function build() {
     const recorded = vi.fn(async () => {});
+    const reopenedIssueIds = new Set<number>();
     const recordAction = scheduledAction('record')
       .args(z.object({}))
       .fn(recorded);
@@ -285,8 +307,10 @@ describe('task.md #3 — issue.closed if not reopened in 5m', () => {
         delay: '5m',
         key: (ctx) => String(ctx.event.issue.id),
         transform: (ctx) => ({ issueId: ctx.event.issue.id }),
-        check: async (): Promise<CheckResult> =>
-          reopened ? { kind: 'skip' } : { kind: 'pass' },
+        check: async (ctx): Promise<CheckResult> => {
+          const issueId = (ctx.payload as { issueId: number }).issueId;
+          return reopenedIssueIds.has(issueId) ? { kind: 'skip' } : { kind: 'pass' };
+        },
       })
       .action('record');
 
@@ -297,11 +321,11 @@ describe('task.md #3 — issue.closed if not reopened in 5m', () => {
     });
     engine.register({ scheduledActions: [recordAction({})], rules: [r()] });
     engine.start();
-    return { engine, recorded, clock };
+    return { engine, recorded, clock, reopenedIssueIds };
   }
 
   test('positive — issue stayed closed for 5m → reaction fires', async () => {
-    const { engine, recorded, clock } = build(/* reopened */ false);
+    const { engine, recorded, clock } = build();
     await engine.evaluate(
       fakeEnvelope('issues.closed', { issue: { id: 1 } } as any),
     );
@@ -313,10 +337,11 @@ describe('task.md #3 — issue.closed if not reopened in 5m', () => {
   });
 
   test('negative — issue was reopened in the window → reaction does NOT fire', async () => {
-    const { engine, recorded, clock } = build(/* reopened */ true);
+    const { engine, recorded, clock, reopenedIssueIds } = build();
     await engine.evaluate(
       fakeEnvelope('issues.closed', { issue: { id: 1 } } as any),
     );
+    reopenedIssueIds.add(1);
     clock.advance(5 * 60_000 + 11_000);
     await new Promise((r) => setImmediate(r));
     expect(recorded).not.toHaveBeenCalled();
@@ -324,7 +349,7 @@ describe('task.md #3 — issue.closed if not reopened in 5m', () => {
   });
 
   test('negative — checked too early (before delay) → not yet fired', async () => {
-    const { engine, recorded, clock } = build(false);
+    const { engine, recorded, clock } = build();
     await engine.evaluate(
       fakeEnvelope('issues.closed', { issue: { id: 1 } } as any),
     );
@@ -380,7 +405,12 @@ describe('task.md #4 — PR comment flagged hostile by classifier', () => {
 
     const r = rule('hostile-pr-comment')
       .on('issue_comment.created')
-      .when(use('is_hostile_comment', { minConfidence: 0.8 }))
+      .when(
+        all(
+          (ctx) => Boolean((ctx.event.issue as any).pull_request),
+          use('is_hostile_comment', { minConfidence: 0.8 }),
+        ),
+      )
       .action('record');
 
     const engine = createEngine();
@@ -397,6 +427,7 @@ describe('task.md #4 — PR comment flagged hostile by classifier', () => {
     const { engine, recorded } = build('hostile');
     await engine.evaluate(
       fakeEnvelope('issue_comment.created', {
+        issue: { pull_request: { url: 'https://api.github.com/pulls/1' } },
         comment: { body: 'something nasty', user: { login: 'mallory' } },
       } as any),
     );
@@ -407,7 +438,19 @@ describe('task.md #4 — PR comment flagged hostile by classifier', () => {
     const { engine, recorded } = build('ok');
     await engine.evaluate(
       fakeEnvelope('issue_comment.created', {
+        issue: { pull_request: { url: 'https://api.github.com/pulls/1' } },
         comment: { body: 'hello there', user: { login: 'alice' } },
+      } as any),
+    );
+    expect(recorded).not.toHaveBeenCalled();
+  });
+
+  test('negative — hostile issue comment that is not on a PR → does NOT fire', async () => {
+    const { engine, recorded } = build('hostile');
+    await engine.evaluate(
+      fakeEnvelope('issue_comment.created', {
+        issue: {},
+        comment: { body: 'something nasty', user: { login: 'mallory' } },
       } as any),
     );
     expect(recorded).not.toHaveBeenCalled();

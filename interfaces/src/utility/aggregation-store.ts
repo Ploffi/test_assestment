@@ -72,6 +72,18 @@ export function createInMemoryAggregationStore(
     return lo;
   };
 
+  // Upper bound on `arr` where `arr[i].at <= target` for all i < result.
+  const upperBound = (arr: AggregationEntry[], target: number): number => {
+    let lo = 0;
+    let hi = arr.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (arr[mid]!.at <= target) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+
   // Insertion point preserving ascending `at` order.
   const insertSorted = (
     arr: AggregationEntry[],
@@ -96,16 +108,19 @@ export function createInMemoryAggregationStore(
 
     async list(ruleId, actionId, keyId, windowMs): Promise<AggregationEntry[]> {
       const bucket = getBucket(ruleId, actionId, keyId);
-      const cutoff = clock.now() - windowMs;
+      const now = clock.now();
+      const cutoff = now - windowMs;
       const start = lowerBound(bucket, cutoff);
+      const end = upperBound(bucket, now);
       // Return a copy so callers can mutate without affecting the store.
-      return bucket.slice(start);
+      return bucket.slice(start, end);
     },
 
     async count(ruleId, actionId, keyId, windowMs): Promise<number> {
       const bucket = getBucket(ruleId, actionId, keyId);
-      const cutoff = clock.now() - windowMs;
-      return bucket.length - lowerBound(bucket, cutoff);
+      const now = clock.now();
+      const cutoff = now - windowMs;
+      return upperBound(bucket, now) - lowerBound(bucket, cutoff);
     },
 
     async appendAndCount(
@@ -117,8 +132,9 @@ export function createInMemoryAggregationStore(
     ): Promise<number> {
       const bucket = getBucket(ruleId, actionId, keyId);
       insertSorted(bucket, entry);
-      const cutoff = clock.now() - windowMs;
-      return bucket.length - lowerBound(bucket, cutoff);
+      const now = clock.now();
+      const cutoff = now - windowMs;
+      return upperBound(bucket, now) - lowerBound(bucket, cutoff);
     },
 
     async prune(olderThanMs): Promise<void> {

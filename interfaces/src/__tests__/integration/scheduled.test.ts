@@ -119,7 +119,9 @@ describe('scheduled — enqueue on evaluate()', () => {
 describe('scheduled — check outcomes', () => {
   test("`pass` fires attached scheduledActions then removes the record", async () => {
     const store = trackingStore();
-    const fired = vi.fn(async (_ctx) => {});
+    const fired = vi.fn(async (_ctx) => {
+      expect(store.calls.removed.length).toBe(0);
+    });
     const act = scheduledAction('sched-act').args(z.object({})).fn(fired);
 
     const r = rule('r')
@@ -146,6 +148,39 @@ describe('scheduled — check outcomes', () => {
 
     expect(fired).toHaveBeenCalledTimes(1);
     expect(store.calls.removed.length).toBe(1);
+
+    await engine.stop();
+  });
+
+  test('scheduled action failure keeps the record for retry after the lease expires', async () => {
+    const store = trackingStore();
+    const failed = vi.fn(async () => {
+      throw new Error('scheduled action failed');
+    });
+    const act = scheduledAction('sched-act').args(z.object({})).fn(failed);
+
+    const r = rule('r')
+      .on('issues.closed')
+      .when(() => true)
+      .schedule({
+        delay: '5m',
+        key: () => 'k',
+        transform: () => ({ id: 1 }),
+        check: async () => ({ kind: 'pass' }),
+      })
+      .action('sched-act');
+
+    const clock = createManualClock(0);
+    const engine = createEngine({ scheduledStore: store, clock });
+    engine.register({ scheduledActions: [act({})], rules: [r()] });
+    engine.start();
+
+    await engine.evaluate(fakeEnvelope('issues.closed'));
+    clock.advance(5 * 60_000 + 11_000);
+    await new Promise((r) => setImmediate(r));
+
+    expect(failed).toHaveBeenCalledTimes(1);
+    expect(store.calls.removed.length).toBe(0);
 
     await engine.stop();
   });

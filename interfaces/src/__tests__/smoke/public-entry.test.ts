@@ -1,0 +1,23 @@
+import { describe, expect, test, vi } from 'vitest';
+import { z } from 'zod';
+
+import {
+  action,
+  createEngine,
+  fakeEnvelope,
+  rule,
+} from '../../index.js';
+
+describe('package root entry', () => {
+  test('exports runtime builders and createEngine', async () => {
+    const fired = vi.fn(async () => {});
+    const a = action('a').args(z.object({})).fn(fired);
+    const r = rule('r').on('push').when(() => true).action('a');
+    const engine = createEngine();
+
+    engine.register({ actions: [a({})], rules: [r()] });
+    await engine.evaluate(fakeEnvelope('push'));
+
+    expect(fired).toHaveBeenCalledTimes(1);
+  });
+});

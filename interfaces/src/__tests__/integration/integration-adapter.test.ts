@@ -15,6 +15,7 @@ import { z } from 'zod';
 
 import {
   createEngine,
+  createManualClock,
   fakeEnvelope,
   rule,
   predicate,
@@ -172,5 +173,149 @@ describe('integration adapter — shared resilience layers', () => {
     // evaluate resolves void; the predicate's throw isolates to a false leaf.
     await engine.evaluate(fakeEnvelope('push'));
     expect(fired).not.toHaveBeenCalled();
+  });
+
+  test('TTL cache expires according to the engine clock and excludes signal from the key', async () => {
+    const clock = createManualClock(0);
+    const underlying = vi.fn(async () => ({ ok: true }));
+    const probe = integration('probe')
+      .cache({ ttl: 10, max: 100 })
+      .methods({
+        get: async (i: { key: string; signal?: AbortSignal }) => {
+          void i;
+          return underlying();
+        },
+      });
+    const p = predicate('p')
+      .args(z.object({}))
+      .fn(async (ctx) => Boolean(await ctx.integrations['probe']?.['get']({ key: 'x', signal: ctx.signal })));
+    const a = action('a').args(z.object({})).fn(async () => {});
+    const r = rule('r').on('push').when(use('p')).action('a');
+    const engine = createEngine({ clock });
+    engine.register({ integrations: [probe], predicates: [p({})], actions: [a({})], rules: [r()] });
+
+    await engine.evaluate(fakeEnvelope('push', undefined, 'd1'));
+    await engine.evaluate(fakeEnvelope('push', undefined, 'd2'));
+    expect(underlying).toHaveBeenCalledTimes(1);
+
+    clock.advance(10);
+    await engine.evaluate(fakeEnvelope('push', undefined, 'd3'));
+    expect(underlying).toHaveBeenCalledTimes(2);
+  });
+
+  test('retry re-invokes a failing underlying call before surfacing failure', async () => {
+    const underlying = vi
+      .fn<() => Promise<{ ok: true }>>()
+      .mockRejectedValueOnce(new Error('transient'))
+      .mockResolvedValueOnce({ ok: true });
+    const probe = integration('probe')
+      .retry({ attempts: 2, backoffMs: 0 })
+      .methods({
+        get: async (_i: { signal?: AbortSignal }) => underlying(),
+      });
+    const fired = vi.fn(async () => {});
+    const a = action('a')
+      .args(z.object({}))
+      .fn(async (ctx) => {
+        await ctx.integrations['probe']?.['get']({ signal: ctx.signal });
+        await fired();
+      });
+    const r = rule('r').on('push').when(() => true).action('a');
+    const engine = createEngine();
+    engine.register({ integrations: [probe], actions: [a({})], rules: [r()] });
+
+    await engine.evaluate(fakeEnvelope('push'));
+    expect(underlying).toHaveBeenCalledTimes(2);
+    expect(fired).toHaveBeenCalledTimes(1);
+  });
+
+  test('breaker opens after failure, fails fast, and half-open probes after reset', async () => {
+    const clock = createManualClock(0);
+    let calls = 0;
+    const probe = integration('probe')
+      .breaker({ errorThresholdPct: 50, resetMs: 100 })
+      .methods({
+        get: async (_i: { signal?: AbortSignal }) => {
+          calls++;
+          if (calls === 1) throw new Error('down');
+          return { ok: true };
+        },
+      });
+    const p = predicate('p')
+      .args(z.object({}))
+      .fn(async (ctx) => Boolean(await ctx.integrations['probe']?.['get']({ signal: ctx.signal })));
+    const fired = vi.fn(async () => {});
+    const a = action('a').args(z.object({})).fn(fired);
+    const r = rule('r').on('push').when(use('p')).action('a');
+    const engine = createEngine({ clock });
+    engine.register({ integrations: [probe], predicates: [p({})], actions: [a({})], rules: [r()] });
+
+    await engine.evaluate(fakeEnvelope('push', undefined, 'd1'));
+    await engine.evaluate(fakeEnvelope('push', undefined, 'd2'));
+    expect(calls).toBe(1);
+    expect(fired).not.toHaveBeenCalled();
+
+    clock.advance(100);
+    await engine.evaluate(fakeEnvelope('push', undefined, 'd3'));
+    expect(calls).toBe(2);
+    expect(fired).toHaveBeenCalledTimes(1);
+  });
+
+  test('concurrency limit is shared across action call sites for one integration', async () => {
+    const releases: Array<() => void> = [];
+    const started: string[] = [];
+    const probe = integration('probe')
+      .concurrency(1)
+      .methods({
+        go: async (i: { name: string; signal?: AbortSignal }) => {
+          started.push(i.name);
+          await new Promise<void>((resolve) => releases.push(resolve));
+        },
+      });
+    const makeAction = (name: string) =>
+      action(name)
+        .args(z.object({}))
+        .fn(async (ctx) => {
+          await ctx.integrations['probe']?.['go']({ name, signal: ctx.signal });
+        });
+    const a = makeAction('a');
+    const b = makeAction('b');
+    const r = rule('r').on('push').when(() => true).action('a').action('b');
+    const engine = createEngine();
+    engine.register({ integrations: [probe], actions: [a({}), b({})], rules: [r()] });
+
+    const evaluation = engine.evaluate(fakeEnvelope('push'));
+    await new Promise((r) => setImmediate(r));
+    expect(started).toEqual(['a']);
+
+    releases.shift()?.();
+    await new Promise((r) => setImmediate(r));
+    expect(started).toEqual(['a', 'b']);
+
+    releases.shift()?.();
+    await evaluation;
+  });
+
+  test('external.call emits runtime metrics with delivery id and cache hit state', async () => {
+    const events: Array<{ deliveryId: string; cacheHit: boolean; ok: boolean }> = [];
+    const probe = integration('probe')
+      .cache({ ttl: '1h' })
+      .methods({ get: async (_i: { signal?: AbortSignal }) => ({ ok: true }) });
+    const p = predicate('p')
+      .args(z.object({}))
+      .fn(async (ctx) => Boolean(await ctx.integrations['probe']?.['get']({ signal: ctx.signal })));
+    const a = action('a').args(z.object({})).fn(async () => {});
+    const r = rule('r').on('push').when(use('p')).action('a');
+    const engine = createEngine();
+    engine.on('external.call', (event) => events.push(event));
+    engine.register({ integrations: [probe], predicates: [p({})], actions: [a({})], rules: [r()] });
+
+    await engine.evaluate(fakeEnvelope('push', undefined, 'delivery-a'));
+    await engine.evaluate(fakeEnvelope('push', undefined, 'delivery-b'));
+
+    expect(events.map((e) => ({ deliveryId: e.deliveryId, cacheHit: e.cacheHit, ok: e.ok }))).toEqual([
+      { deliveryId: 'delivery-a', cacheHit: false, ok: true },
+      { deliveryId: 'delivery-b', cacheHit: true, ok: true },
+    ]);
   });
 });

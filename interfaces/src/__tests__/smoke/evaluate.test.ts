@@ -17,6 +17,7 @@ import { z } from 'zod';
 
 import {
   createEngine,
+  createManualClock,
   fakeEnvelope,
   rule,
   predicate,
@@ -221,6 +222,85 @@ describe('engine.evaluate — cancellation', () => {
     engine.register({ actions: [wedged({})], rules: [r()] });
 
     await expect(engine.evaluate(fakeEnvelope('push'))).rejects.toThrow();
+  });
+
+  test('late predicate resolution after timeout does not launch actions', async () => {
+    const clock = createManualClock(0);
+    let resolvePredicate: ((value: boolean) => void) | undefined;
+    const slow = predicate('slow')
+      .args(z.object({}))
+      .fn(
+        () =>
+          new Promise<boolean>((resolve) => {
+            resolvePredicate = resolve;
+          }),
+      );
+    const fired = vi.fn(async () => {});
+    const a = action('a').args(z.object({})).fn(fired);
+    const r = rule('r').on('push').when(use('slow')).action('a');
+
+    const engine = createEngine({ clock, evaluationTimeoutMs: 10 });
+    engine.register({ predicates: [slow({})], actions: [a({})], rules: [r()] });
+
+    const evaluation = engine.evaluate(fakeEnvelope('push'));
+    clock.advance(10);
+    await expect(evaluation).rejects.toThrow(/evaluation timeout|aborted/);
+
+    resolvePredicate?.(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fired).not.toHaveBeenCalled();
+  });
+});
+
+describe('engine.evaluate — args validation', () => {
+  test('invalid merged action args reject and do not invoke the action', async () => {
+    const fired = vi.fn(async () => {});
+    const a = action('a')
+      .args(z.object({ channel: z.string() }))
+      .fn(fired);
+    const r = rule('r')
+      .on('push')
+      .when(() => true)
+      .action('a', { channel: 123 });
+
+    const engine = createEngine();
+    engine.register({ actions: [a({})], rules: [r()] });
+
+    await expect(engine.evaluate(fakeEnvelope('push'))).rejects.toThrow();
+    expect(fired).not.toHaveBeenCalled();
+  });
+});
+
+describe('engine.evaluate — logger scoping', () => {
+  test('action ctx.logger is child-bound with deliveryId, ruleId, and actionName', async () => {
+    const makeLogger = (bindings: Record<string, unknown> = {}) => ({
+      bindings,
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      child(next: object) {
+        return makeLogger({ ...bindings, ...next });
+      },
+    });
+    let observed: Record<string, unknown> | undefined;
+    const a = action('a')
+      .args(z.object({}))
+      .fn(async (ctx) => {
+        observed = (ctx.logger as unknown as { bindings: Record<string, unknown> }).bindings;
+      });
+    const r = rule('r').on('push').when(() => true).action('a');
+    const engine = createEngine({ logger: makeLogger() });
+    engine.register({ actions: [a({})], rules: [r()] });
+
+    await engine.evaluate(fakeEnvelope('push', undefined, 'delivery-logger'));
+
+    expect(observed).toMatchObject({
+      deliveryId: 'delivery-logger',
+      ruleId: 'r',
+      actionName: 'a',
+    });
   });
 });
 

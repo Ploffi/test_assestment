@@ -13,6 +13,7 @@ import {
   createEngine,
   rule,
   action,
+  aggregatedAction,
   use,
 } from '../_harness.js';
 import {
@@ -245,6 +246,31 @@ describe('engine.register — failure: dependency graph (pass 1)', () => {
       (caught as RegistrationError).issues.some((i) => i.code === 'duplicate-name'),
     ).toBe(true);
   });
+
+  test('duplicate-name when action kinds share a name in one batch', () => {
+    const plain = action('same-name').args(z.object({})).fn(async () => {});
+    const aggregate = aggregatedAction('same-name')
+      .on('push')
+      .args(z.object({}))
+      .transform(() => ({}))
+      .fn(async () => {});
+
+    const engine = createEngine();
+    let caught: unknown;
+    try {
+      engine.register({
+        actions: [plain({})],
+        aggregatedActions: [aggregate({})],
+        rules: [],
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(RegistrationError);
+    expect(
+      (caught as RegistrationError).issues.some((i) => i.code === 'duplicate-name'),
+    ).toBe(true);
+  });
 });
 
 describe('engine.register — failure: schema (pass 2)', () => {
@@ -297,6 +323,31 @@ describe('engine.register — failure: schema (pass 2)', () => {
     );
     expect(issue).toBeDefined();
     expect(issue!.path).toEqual(['inner', 'port']);
+  });
+
+  test('rule args are validated as complete because rules have no use-site merge', () => {
+    const needsTenant = rule('needs-tenant')
+      .args(z.object({ tenant: z.string() }))
+      .on('push')
+      .when((ctx) => ctx.args.tenant === 'acme')
+      .action('notify-slack');
+
+    const engine = createEngine();
+    let caught: unknown;
+    try {
+      engine.register({
+        actions: [notifySlack({ channel: '#x' })],
+        rules: [needsTenant()],
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(RegistrationError);
+    expect(
+      (caught as RegistrationError).issues.some(
+        (i) => i.code === 'invalid-args' && i.entity.kind === 'rule',
+      ),
+    ).toBe(true);
   });
 });
 

@@ -3,7 +3,8 @@
  *
  *  - `evaluate()` before `register()` throws `EngineNotReadyError`.
  *  - `start()` is idempotent and no-op for engines without scheduled rules.
- *  - `stop()` waits for in-flight work to settle and returns Promise<void>.
+ *  - `stop()` aborts in-flight evaluations and returns Promise<void> after
+ *    those evaluation promises settle.
  *  - After `stop()`, further `evaluate()` calls are not guaranteed to work
  *    (engine consumes a `stop -> recreate` lifecycle, not `stop -> reuse`).
  */
@@ -46,13 +47,17 @@ describe('engine lifecycle', () => {
     await engine.stop();
   });
 
-  test('stop() waits for in-flight evaluate() to settle', async () => {
-    const finishedAfterStop = vi.fn();
+  test('stop() aborts in-flight evaluate() and waits for the rejection to settle', async () => {
+    const observedAbort = vi.fn();
     const slow = action('slow')
       .args(z.object({}))
-      .fn(async () => {
-        await new Promise((r) => setTimeout(r, 50));
-        finishedAfterStop();
+      .fn(async (ctx) => {
+        await new Promise<void>((_resolve, reject) => {
+          ctx.signal.addEventListener('abort', () => {
+            observedAbort();
+            reject(new Error('aborted'));
+          });
+        });
       });
 
     const r = rule('r').on('push').when(() => true).action('slow');
@@ -61,11 +66,11 @@ describe('engine lifecycle', () => {
     engine.start();
 
     const inflight = engine.evaluate(fakeEnvelope('push'));
+    await new Promise((r) => setImmediate(r));
     const stopped = engine.stop();
 
-    // stop() resolves only after the in-flight evaluation completes;
-    // both promises share that completion timing.
-    await Promise.all([inflight, stopped]);
-    expect(finishedAfterStop).toHaveBeenCalledTimes(1);
+    await expect(inflight).rejects.toThrow();
+    await expect(stopped).resolves.toBeUndefined();
+    expect(observedAbort).toHaveBeenCalledTimes(1);
   });
 });

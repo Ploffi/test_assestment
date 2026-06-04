@@ -53,18 +53,25 @@ aggregatedAction(name)
   .args(schema)
   .transform((ctx: BaseCtx<E, Args>) => Payload)
   .fn((ctx: BaseCtx<E, Args> & {
-    entries: ReadonlyArray<{ at: number; deliveryId: string; payload: Payload }>;
-    keyId: string;
+    aggregate: {
+      entries: ReadonlyArray<{ at: number; deliveryId: string; payload: Payload }>;
+      count: number;
+      windowMs: number;
+      keyId: string;
+    };
   }) => void | Promise<void>);
-// Payload is the return type of .transform; .fn sees the stored window via ctx.entries.
+// Payload is the return type of .transform; .fn sees the stored window via ctx.aggregate.
 
 // --- scheduledAction ---
 scheduledAction(name)
   .args(schema)
-  .fn((ctx: BaseCtx<E, Args> & {
-    payload: unknown;                // type carried by the rule's .schedule({ transform }) — see ADR-007
-    keyId: string;
-    scheduledAt: number;             // when the rule enqueued this check
+  .fn((ctx: Omit<BaseCtx<E, Args>, 'event'> & {
+    scheduled: {
+      payload: unknown;              // type carried by the rule's .schedule({ transform }) — see ADR-007
+      keyId: string;
+      scheduledAt: number;           // when the rule enqueued this check
+      ranAt: number;                 // when the scheduler fired the check
+    };
   }) => void | Promise<void>);
 // scheduledAction has no .on() of its own — the rule's .on() pinned E when the entry was enqueued.
 // .transform lives on the rule's .schedule(...), not on the action — see ADR-007.
@@ -143,7 +150,7 @@ Hot-swap of rules requires a fresh `register()` call. Two-phase commit is not pr
 - **Throw on the first issue (fail-fast).** Faster code path but worse author experience: a single rule file with three typos requires three runs. The two-pass model already collects everything; we surface everything.
 - **Run validation asynchronously, return a `Promise<Result<Engine, RegistrationError>>`.** The user explicitly chose synchronous in [ADR-002](002-dsl-design.md). Synchronous keeps the failure trivially observable at the call site and the registry has no I/O.
 - **Allow incremental registration (`engine.add(predicate)`).** Forces the dependency-graph pass to re-run on every add, or run on first `evaluate()`. Worse failure timing. Rejected — `register()` takes a complete batch; consumers compose the batch in TypeScript first.
-- **Type `payload` on `scheduledAction.fn` ctx via the rule's `.schedule({ transform })` return type.** Would be type-safe but couples two entities through the registry types. Currently typed as `unknown`; consumers cast inside `.fn` if they want. A future ADR can tighten this once the engine has shipped and consumers have a concrete use case for the stricter type.
+- **Type `ctx.scheduled.payload` on `scheduledAction.fn` via the rule's `.schedule({ transform })` return type.** Would be type-safe but couples two entities through the registry types. Currently typed as `unknown`; consumers cast inside `.fn` if they want. A future ADR can tighten this once the engine has shipped and consumers have a concrete use case for the stricter type.
 - **Surface `RegistrationError` issues as compiler diagnostics via a build plugin.** Out of scope. The error already carries enough structure for a build plugin to render diagnostics if a consumer wants one.
 
 ## Consequences
@@ -156,6 +163,6 @@ Hot-swap of rules requires a fresh `register()` call. Two-phase commit is not pr
 
 **Negative:**
 - `RegistrationIssue.path` for invalid-args mirrors Zod's path shape; if we ever change the args validator we have to map paths to the same shape. Acceptable; Zod is the chosen validator.
-- `scheduledAction.fn`'s `ctx.payload: unknown` is weaker typing than the rest of the surface; tightened in a later ADR if usage patterns make a stronger contract cheap.
+- `scheduledAction.fn`'s `ctx.scheduled.payload: unknown` is weaker typing than the rest of the surface; tightened in a later ADR if usage patterns make a stronger contract cheap.
 - A consumer who only wants a quick try-out has to construct a complete batch and call `register()` before any `evaluate()` works. The friction is one line; the win is "either the engine is ready or it tells you exactly what's wrong."
 - Re-registration is whole-batch replacement, not patch. A consumer hot-reloading rules pays full revalidation. Acceptable for the rule-engine use case; rules change far less often than events fire.

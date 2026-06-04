@@ -103,6 +103,21 @@ describe('createInMemoryAggregationStore — rolling window', () => {
     const count = await store.count('r', 'a', 'k', 5_000);
     expect(count).toBe(1);
   });
+
+  test('entries after `now` are excluded from count and list (closed upper bound)', async () => {
+    const clock = createManualClock(10_000);
+    const store = createInMemoryAggregationStore({ clock });
+
+    await store.append('r', 'a', 'k', entry(9_000, 'inside'));
+    await store.append('r', 'a', 'k', entry(10_000, 'on-now'));
+    await store.append('r', 'a', 'k', entry(11_000, 'future'));
+
+    expect(await store.count('r', 'a', 'k', 5_000)).toBe(2);
+    expect((await store.list('r', 'a', 'k', 5_000)).map((e) => e.deliveryId)).toEqual([
+      'inside',
+      'on-now',
+    ]);
+  });
 });
 
 describe('createInMemoryAggregationStore — appendAndCount', () => {

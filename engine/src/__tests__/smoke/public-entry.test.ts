@@ -20,4 +20,27 @@ describe('package root entry', () => {
 
     expect(fired).toHaveBeenCalledTimes(1);
   });
+
+  test('builders allow reordered settings and last setting wins', async () => {
+    const first = vi.fn(async () => {});
+    const second = vi.fn(async () => {});
+    const a = action('a')
+      .fn(first)
+      .args(z.object({ value: z.string() }))
+      .fn(second);
+    const r = rule('r')
+      .action('a', { value: 'ok' })
+      .on('issues.opened')
+      .when(() => false)
+      .on('push')
+      .when(() => true);
+    const engine = createEngine();
+
+    engine.register({ actions: [a()], rules: [r()] });
+    await engine.evaluate(fakeEnvelope('issues.opened'));
+    await engine.evaluate(fakeEnvelope('push'));
+
+    expect(first).not.toHaveBeenCalled();
+    expect(second).toHaveBeenCalledTimes(1);
+  });
 });

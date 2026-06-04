@@ -1,4 +1,3 @@
-import type { z } from 'zod';
 import type {
   EngineOptions,
   RuleEngine,
@@ -12,40 +11,21 @@ import type {
   EngineEventPayload,
   ScheduledOutcome,
 } from '../public/emitter.js';
-import {
-  RegistrationError,
-  EngineNotReadyError,
-  type RegistrationIssue,
-} from '../public/register.js';
+import { EngineNotReadyError } from '../public/register.js';
 import type {
-  RegisteredPredicate,
   RegisteredAction,
   RegisteredAggregatedAction,
   RegisteredScheduledAction,
-  RegisteredIntegration,
-  RegisteredRule,
-  AnyRegisteredAction,
   EventEnvelope,
   WebhookEventName,
-  BaseCtx,
-  AggregatedCtx,
   ScheduledCtx,
-  AnyEventPayload,
   Clock,
   Timer,
   Logger,
   AggregationStore,
   ScheduledStore,
-  WhenNode,
-  AllNode,
-  AnyNode,
-  NotNode,
-  UseRef,
-  IntegrationAdapter,
-  IntegrationMethods,
   CheckCtx,
   CheckResult,
-  ActionAttachment,
   RuleStrategy,
 } from '../public/index.js';
 
@@ -54,15 +34,18 @@ import { createNoopLogger } from '../utility/logger.js';
 import { createInMemoryAggregationStore } from '../utility/aggregation-store.js';
 import { createInMemoryScheduledStore } from '../utility/scheduled-store.js';
 import { parseDuration } from './duration.js';
-import { canonicalJson } from './canonical.js';
-import { attachIntegrationCallContext, buildAdapter } from './adapter.js';
-
-interface PendingAction {
-  fn: () => Promise<void>;
-}
+import { buildRegistry } from './registration.js';
+import { EngineEmitter } from './emitter.js';
+import { bindIntegrations, makeBaseCtx } from './context.js';
+import {
+  type PendingAction,
+  mergeActionArgs,
+  queueAggregatedAction,
+  queuePlainAction,
+} from './actions.js';
+import { evaluateWhen } from './predicates.js';
 
 class EngineImpl implements RuleEngine {
-  private opts: EngineOptions;
   private clock: Clock;
   private aggStore: AggregationStore;
   private schedStore: ScheduledStore;
@@ -70,7 +53,7 @@ class EngineImpl implements RuleEngine {
   private evalTimeoutMs: number;
   private schedPollMs: number;
   private registry: Registry | null = null;
-  private subs: Map<string, Set<(p: any) => void>> = new Map();
+  private events = new EngineEmitter();
   private inflight = new Set<Promise<unknown>>();
   private evalControllers = new Set<AbortController>();
   private started = false;
@@ -78,7 +61,6 @@ class EngineImpl implements RuleEngine {
   private schedTimer: Timer | null = null;
 
   constructor(opts: EngineOptions = {}) {
-    this.opts = opts;
     this.clock = opts.clock ?? SystemClock;
     this.aggStore = opts.aggregationStore ?? createInMemoryAggregationStore({ clock: this.clock });
     this.schedStore = opts.scheduledStore ?? createInMemoryScheduledStore();
@@ -93,212 +75,10 @@ class EngineImpl implements RuleEngine {
    * ============================================================ */
 
   register(batch: RegisterBatch): void {
-    const issues: RegistrationIssue[] = [];
-    const reg: Registry = {
-      predicates: new Map(),
-      actions: new Map(),
-      aggregatedActions: new Map(),
-      scheduledActions: new Map(),
-      integrations: new Map(),
-      rules: new Map(),
-      actionByName: new Map(),
-      dispatch: new Map(),
-      adapters: {},
-    };
-
-    const addUnique = <T extends { name: string }>(
-      map: Map<string, T>,
-      entity: T,
-      kind: RegistrationIssue['entity']['kind'],
-    ) => {
-      if (map.has(entity.name)) {
-        issues.push({
-          code: 'duplicate-name',
-          entity: { kind, name: entity.name },
-          message: `duplicate ${kind} name: ${entity.name}`,
-        });
-        return;
-      }
-      map.set(entity.name, entity);
-    };
-
-    for (const p of batch.predicates ?? []) addUnique(reg.predicates, p, 'predicate');
-    for (const a of batch.actions ?? []) addUnique(reg.actions, a, 'action');
-    for (const a of batch.aggregatedActions ?? []) addUnique(reg.aggregatedActions, a, 'aggregatedAction');
-    for (const a of batch.scheduledActions ?? []) addUnique(reg.scheduledActions, a, 'scheduledAction');
-    for (const i of batch.integrations ?? []) addUnique(reg.integrations, i, 'integration');
-    for (const r of batch.rules ?? []) addUnique(reg.rules, r, 'rule');
-
-    // Build unified action lookup. Rule attachments are by name only, so names
-    // must be globally unique across the three action kinds.
-    const addActionLookup = (a: AnyRegisteredAction): void => {
-      if (reg.actionByName.has(a.name)) {
-        issues.push({
-          code: 'duplicate-name',
-          entity: { kind: a.kind, name: a.name },
-          message: `duplicate action name across action kinds: ${a.name}`,
-        });
-        return;
-      }
-      reg.actionByName.set(a.name, a);
-    };
-    for (const a of reg.actions.values()) addActionLookup(a);
-    for (const a of reg.aggregatedActions.values()) addActionLookup(a);
-    for (const a of reg.scheduledActions.values()) addActionLookup(a);
-
-    // Pass 1: dependency graph + cross-references
-    for (const r of reg.rules.values()) {
-      // Walk when tree for use(name)
-      const checkUse = (n: WhenNode<any, any>) => {
-        if (typeof n === 'function') return;
-        if ('kind' in n) {
-          if (n.kind === 'use') {
-            const useRef = n as UseRef;
-            if (!reg.predicates.has(useRef.name)) {
-              issues.push({
-                code: 'unknown-predicate',
-                entity: { kind: 'rule', name: r.name },
-                message: `rule "${r.name}" uses unknown predicate "${useRef.name}"`,
-                related: { kind: 'predicate', name: useRef.name },
-              });
-            }
-          } else if (n.kind === 'all' || n.kind === 'any') {
-            for (const c of (n as AllNode<any, any> | AnyNode<any, any>).children) checkUse(c);
-          } else if (n.kind === 'not') {
-            checkUse((n as NotNode<any, any>).child);
-          }
-        }
-      };
-      if (r.when) checkUse(r.when);
-
-      // Check action attachments
-      const strat = r.strategy;
-      let hasAggregatedActionAttached = false;
-      let hasScheduledActionAttached = false;
-      for (const att of r.actions) {
-        const found = reg.actionByName.get(att.name);
-        if (!found) {
-          issues.push({
-            code: 'unknown-action',
-            entity: { kind: 'rule', name: r.name },
-            message: `rule "${r.name}" references unknown action "${att.name}"`,
-            related: { kind: 'action', name: att.name },
-          });
-          continue;
-        }
-        if (found.kind === 'aggregatedAction') {
-          hasAggregatedActionAttached = true;
-          const agg = found as RegisteredAggregatedAction<string, WebhookEventName, any, any>;
-          if (strat.kind !== 'aggregate') {
-            issues.push({
-              code: 'kind-mismatch',
-              entity: { kind: 'rule', name: r.name },
-              message: `aggregatedAction "${agg.name}" attached to non-aggregating rule "${r.name}"`,
-              related: { kind: 'aggregatedAction', name: agg.name },
-            });
-          }
-          if (agg.eventName !== r.eventName) {
-            issues.push({
-              code: 'on-mismatch',
-              entity: { kind: 'rule', name: r.name },
-              message: `aggregatedAction "${agg.name}" .on(${agg.eventName}) does not match rule "${r.name}" .on(${r.eventName})`,
-              related: { kind: 'aggregatedAction', name: agg.name },
-            });
-          }
-        } else if (found.kind === 'scheduledAction') {
-          hasScheduledActionAttached = true;
-          if (strat.kind !== 'schedule') {
-            issues.push({
-              code: 'kind-mismatch',
-              entity: { kind: 'rule', name: r.name },
-              message: `scheduledAction "${found.name}" attached to non-scheduled rule "${r.name}"`,
-              related: { kind: 'scheduledAction', name: found.name },
-            });
-          }
-        }
-      }
-
-      if (strat.kind === 'aggregate' && !hasAggregatedActionAttached) {
-        issues.push({
-          code: 'missing-aggregated-action',
-          entity: { kind: 'rule', name: r.name },
-          message: `aggregating rule "${r.name}" has no aggregatedAction attached`,
-        });
-      }
-      if (strat.kind === 'schedule' && !hasScheduledActionAttached) {
-        issues.push({
-          code: 'missing-scheduled-action',
-          entity: { kind: 'rule', name: r.name },
-          message: `scheduled rule "${r.name}" has no scheduledAction attached`,
-        });
-      }
-    }
-
-    // Pass 2: schema validation on pinned args
-    const validateArgs = (
-      schema: z.ZodType<any> | undefined,
-      pinned: unknown,
-      entity: RegistrationIssue['entity'],
-      partial: boolean,
-    ) => {
-      if (!schema || typeof (schema as any).safeParse !== 'function') return;
-      // Predicate/action pinned args are Partial<Args>; rule args have no
-      // use-site merge later and must be complete at registration time.
-      const partialed = partial && typeof (schema as any).partial === 'function'
-        ? (schema as any).partial()
-        : schema;
-      const result = (partialed as any).safeParse(pinned ?? {});
-      if (!result.success) {
-        const zerr = result.error;
-        const zissues = zerr?.issues ?? zerr?.errors ?? [];
-        for (const zi of zissues) {
-          issues.push({
-            code: 'invalid-args',
-            entity,
-            path: zi.path ?? [],
-            message: zi.message ?? 'invalid args',
-          });
-        }
-      }
-    };
-
-    for (const p of reg.predicates.values()) {
-      validateArgs(p.argsSchema, p.pinnedArgs, { kind: 'predicate', name: p.name }, true);
-    }
-    for (const a of reg.actions.values()) {
-      validateArgs(a.argsSchema, a.pinnedArgs, { kind: 'action', name: a.name }, true);
-    }
-    for (const a of reg.aggregatedActions.values()) {
-      validateArgs(a.argsSchema, a.pinnedArgs, { kind: 'aggregatedAction', name: a.name }, true);
-    }
-    for (const a of reg.scheduledActions.values()) {
-      validateArgs(a.argsSchema, a.pinnedArgs, { kind: 'scheduledAction', name: a.name }, true);
-    }
-    for (const r of reg.rules.values()) {
-      if (r.argsSchema) validateArgs(r.argsSchema, r.pinnedArgs, { kind: 'rule', name: r.name }, false);
-    }
-
-    if (issues.length) throw new RegistrationError(issues);
-
-    // Build dispatch index
-    for (const r of reg.rules.values()) {
-      let list = reg.dispatch.get(r.eventName);
-      if (!list) {
-        list = [];
-        reg.dispatch.set(r.eventName, list);
-      }
-      list.push(r);
-    }
-
-    // Build adapters
-    for (const i of reg.integrations.values()) {
-      reg.adapters[i.name] = buildAdapter(i as RegisteredIntegration<string, IntegrationMethods>, {
-        clock: this.clock,
-        emit: (event) => this.emit('external.call', event),
-      });
-    }
-
-    this.registry = reg;
+    this.registry = buildRegistry(batch, {
+      clock: this.clock,
+      emitExternalCall: (event) => this.emit('external.call', event),
+    });
   }
 
   /* ============================================================ *
@@ -306,24 +86,15 @@ class EngineImpl implements RuleEngine {
    * ============================================================ */
 
   on<N extends EngineEventName>(eventName: N, cb: (p: EngineEventPayload<N>) => void): void {
-    let set = this.subs.get(eventName as string);
-    if (!set) {
-      set = new Set();
-      this.subs.set(eventName as string, set);
-    }
-    set.add(cb as (p: any) => void);
+    this.events.on(eventName, cb);
   }
 
   off<N extends EngineEventName>(eventName: N, cb: (p: EngineEventPayload<N>) => void): void {
-    this.subs.get(eventName as string)?.delete(cb as (p: any) => void);
+    this.events.off(eventName, cb);
   }
 
   private emit<N extends EngineEventName>(eventName: N, payload: EngineEventPayload<N>): void {
-    const set = this.subs.get(eventName as string);
-    if (!set) return;
-    for (const cb of set) {
-      try { cb(payload); } catch { /* ignore */ }
-    }
+    this.events.emit(eventName, payload);
   }
 
   /* ============================================================ *
@@ -480,10 +251,27 @@ class EngineImpl implements RuleEngine {
       this.throwIfAborted(signal);
       const ruleStartedAt = this.clock.now();
       const ruleArgs = (rule.pinnedArgs ?? {}) as Record<string, unknown>;
-      const baseCtx = this.makeBaseCtx(envelope, deliveryId, startedAt, signal, registry, ruleArgs, rule.name);
+      const baseCtx = makeBaseCtx({
+        envelope,
+        deliveryId,
+        startedAt,
+        signal,
+        registry,
+        args: ruleArgs,
+        logger: this.logger,
+        ruleId: rule.name,
+      });
       let whenResult = true;
       if (rule.when !== undefined) {
-        whenResult = await this.evaluateWhen(rule.when, baseCtx, memo, registry, deliveryId);
+        whenResult = await evaluateWhen({
+          node: rule.when,
+          ctx: baseCtx,
+          memo,
+          registry,
+          deliveryId,
+          clock: this.clock,
+          emitPredicateEvaluated: (event) => this.emit('predicate.evaluated', event),
+        });
         this.throwIfAborted(signal);
       }
       if (!whenResult) {
@@ -498,7 +286,7 @@ class EngineImpl implements RuleEngine {
         matchedCount++;
         this.emit('rule.matched', { deliveryId, ruleId: rule.name, elapsedMs: this.clock.now() - ruleStartedAt });
         for (const att of rule.actions) {
-          this.queuePlainAction(pending, rule, att, baseCtx, registry);
+          queuePlainAction(pending, att, baseCtx, registry);
         }
       } else if (strat.kind === 'aggregate') {
         this.throwIfAborted(signal);
@@ -531,7 +319,15 @@ class EngineImpl implements RuleEngine {
             });
             if (count >= strat.count) {
               ruleFired = true;
-              this.queueAggregatedAction(pending, rule, agg, att, baseCtx, keyId, windowMs, registry);
+              queueAggregatedAction(pending, {
+                aggStore: this.aggStore,
+                rule,
+                agg,
+                att,
+                baseCtx,
+                keyId,
+                windowMs,
+              });
             }
           }
         }
@@ -541,7 +337,7 @@ class EngineImpl implements RuleEngine {
           for (const att of rule.actions) {
             const action = registry.actionByName.get(att.name);
             if (action && action.kind === 'action') {
-              this.queuePlainAction(pending, rule, att, baseCtx, registry);
+              queuePlainAction(pending, att, baseCtx, registry);
             }
           }
         } else {
@@ -590,279 +386,6 @@ class EngineImpl implements RuleEngine {
     throw reason instanceof Error ? reason : new Error('aborted');
   }
 
-  private scopedLogger(bindings: object): Logger {
-    return this.logger.child(bindings);
-  }
-
-  private bindIntegrations(
-    registry: Registry,
-    deliveryId: string,
-  ): Record<string, IntegrationAdapter<IntegrationMethods>> {
-    const out: Record<string, IntegrationAdapter<IntegrationMethods>> = {};
-    for (const [integrationName, adapter] of Object.entries(registry.adapters)) {
-      const methods: Record<string, (input: any) => Promise<any>> = {};
-      for (const [methodName, fn] of Object.entries(adapter)) {
-        methods[methodName] = (input: any) =>
-          fn(attachIntegrationCallContext(input, { deliveryId }));
-      }
-      out[integrationName] = methods as IntegrationAdapter<IntegrationMethods>;
-    }
-    return out;
-  }
-
-  private makeBaseCtx(
-    envelope: EventEnvelope,
-    deliveryId: string,
-    startedAt: number,
-    signal: AbortSignal,
-    registry: Registry,
-    args: any,
-    ruleId?: string,
-  ): BaseCtx<AnyEventPayload, any> {
-    const payload: any = envelope.payload ?? {};
-    const loggerBindings: Record<string, unknown> = { deliveryId };
-    if (ruleId !== undefined) loggerBindings.ruleId = ruleId;
-    if (payload?.installation?.id !== undefined) loggerBindings.installation = { id: payload.installation.id };
-    if (payload?.repository) {
-      loggerBindings.repo = {
-        id: payload.repository.id ?? 0,
-        fullName: payload.repository.full_name ?? '',
-      };
-    }
-    const ctx: BaseCtx<AnyEventPayload, any> = {
-      event: payload,
-      args,
-      signal,
-      deliveryId,
-      now: startedAt,
-      logger: this.scopedLogger(loggerBindings),
-      integrations: this.bindIntegrations(registry, deliveryId),
-    };
-    if (payload?.installation?.id !== undefined) {
-      ctx.installation = { id: payload.installation.id };
-    }
-    if (payload?.repository) {
-      ctx.repo = {
-        id: payload.repository.id ?? 0,
-        fullName: payload.repository.full_name ?? '',
-      };
-    }
-    return ctx;
-  }
-
-  private async evaluateWhen(
-    node: WhenNode<any, any>,
-    ctx: BaseCtx<AnyEventPayload, any>,
-    memo: Map<string, MemoSlot>,
-    registry: Registry,
-    deliveryId: string,
-  ): Promise<boolean> {
-    if (typeof node === 'function') {
-      try {
-        return !!(await (node as (c: any) => boolean | Promise<boolean>)(ctx));
-      } catch {
-        return false;
-      }
-    }
-    if ('kind' in node) {
-      if (node.kind === 'all') {
-        for (const c of (node as AllNode<any, any>).children) {
-          const v = await this.evaluateWhen(c, ctx, memo, registry, deliveryId);
-          if (!v) return false;
-        }
-        return true;
-      }
-      if (node.kind === 'any') {
-        for (const c of (node as AnyNode<any, any>).children) {
-          const v = await this.evaluateWhen(c, ctx, memo, registry, deliveryId);
-          if (v) return true;
-        }
-        return false;
-      }
-      if (node.kind === 'not') {
-        const v = await this.evaluateWhen((node as NotNode<any, any>).child, ctx, memo, registry, deliveryId);
-        return !v;
-      }
-      if (node.kind === 'use') {
-        return this.resolveUse(node as UseRef, ctx, memo, registry, deliveryId);
-      }
-    }
-    return false;
-  }
-
-  private async resolveUse(
-    ref: UseRef,
-    ctx: BaseCtx<AnyEventPayload, any>,
-    memo: Map<string, MemoSlot>,
-    registry: Registry,
-    deliveryId: string,
-  ): Promise<boolean> {
-    const pred = registry.predicates.get(ref.name);
-    if (!pred) return false;
-    const startedAt = this.clock.now();
-    let merged: Record<string, unknown> = {};
-    const pinnedFailOpen = (pred.pinnedArgs as any)?.failOpen === true;
-    const useSiteFailOpen = (ref.args as any)?.failOpen === true;
-    const fail = (err: unknown): boolean => {
-      try {
-        ctx.logger.warn({ err, predicateName: ref.name }, 'predicate evaluated as false');
-      } catch { /* logger failures must not break predicate isolation */ }
-      return pinnedFailOpen || useSiteFailOpen || merged.failOpen === true;
-    };
-
-    try {
-      // Resolve use-site args: evaluate (ctx)=>value callbacks against rule ctx.
-      const useArgs: Record<string, unknown> = {};
-      for (const k of Object.keys(ref.args ?? {})) {
-        const v = (ref.args as any)[k];
-        useArgs[k] = typeof v === 'function' ? v(ctx) : v;
-      }
-      // Merge: registration > use-site
-      merged = { ...useArgs };
-      for (const k of Object.keys(pred.pinnedArgs ?? {})) {
-        const v = (pred.pinnedArgs as any)[k];
-        if (v !== undefined) merged[k] = v;
-      }
-
-      const hash = canonicalJson(merged);
-      const key = `${ref.name}@${hash}`;
-      const cached = memo.get(key);
-      if (cached) {
-        const result = await cached.promise;
-        this.emit('predicate.evaluated', {
-          deliveryId,
-          predicateName: ref.name,
-          result,
-          elapsedMs: 0,
-          cached: true,
-        });
-        return result;
-      }
-
-      const promise = (async (): Promise<boolean> => {
-        let argsForFn: any = merged;
-        if (pred.argsSchema && typeof (pred.argsSchema as any).safeParse === 'function') {
-          const result = (pred.argsSchema as any).safeParse(merged);
-          if (result.success) argsForFn = result.data;
-          else return fail(result.error);
-        }
-        const predCtx: BaseCtx<AnyEventPayload, any> = {
-          ...ctx,
-          args: argsForFn,
-          logger: ctx.logger.child({ predicateName: ref.name }),
-        };
-        try {
-          return !!(await pred.fn(predCtx));
-        } catch (err) {
-          return fail(err);
-        }
-      })();
-
-      const slot: MemoSlot = { promise };
-      memo.set(key, slot);
-
-      const result = await promise;
-      this.emit('predicate.evaluated', {
-        deliveryId,
-        predicateName: ref.name,
-        result,
-        elapsedMs: this.clock.now() - startedAt,
-        cached: false,
-      });
-      return result;
-    } catch (err) {
-      const result = fail(err);
-      this.emit('predicate.evaluated', {
-        deliveryId,
-        predicateName: ref.name,
-        result,
-        elapsedMs: this.clock.now() - startedAt,
-        cached: false,
-      });
-      return result;
-    }
-  }
-
-  private queuePlainAction(
-    pending: PendingAction[],
-    rule: RegisteredRule<string, WebhookEventName, any>,
-    att: ActionAttachment,
-    baseCtx: BaseCtx<AnyEventPayload, any>,
-    registry: Registry,
-  ): void {
-    const action = registry.actionByName.get(att.name);
-    if (!action) return;
-    if (action.kind !== 'action') return; // not a plain action
-    const plain = action as RegisteredAction<string, any>;
-    void rule;
-    pending.push({
-      fn: async () => {
-        const mergedArgs = this.mergeActionArgs(plain.pinnedArgs, att.args, baseCtx, plain.argsSchema);
-        const ctx = {
-          ...baseCtx,
-          args: mergedArgs,
-          logger: baseCtx.logger.child({ actionName: plain.name }),
-        };
-        await plain.fn(ctx);
-      },
-    });
-  }
-
-  private queueAggregatedAction(
-    pending: PendingAction[],
-    rule: RegisteredRule<string, WebhookEventName, any>,
-    agg: RegisteredAggregatedAction<string, WebhookEventName, any, any>,
-    att: ActionAttachment,
-    baseCtx: BaseCtx<AnyEventPayload, any>,
-    keyId: string,
-    windowMs: number,
-    registry: Registry,
-  ): void {
-    void registry;
-    pending.push({
-      fn: async () => {
-        const entries = await this.aggStore.list(rule.name, agg.name, keyId, windowMs);
-        const mergedArgs = this.mergeActionArgs(agg.pinnedArgs, att.args, baseCtx, agg.argsSchema);
-        const aggCtx: AggregatedCtx<WebhookEventName, any> = {
-          ...baseCtx,
-          args: mergedArgs,
-          logger: baseCtx.logger.child({ actionName: agg.name }),
-          aggregate: {
-            entries: entries.map((e) => ({ at: e.at, deliveryId: e.deliveryId, payload: e.payload })),
-            count: entries.length,
-            windowMs,
-            keyId,
-          },
-        };
-        await agg.fn(aggCtx);
-      },
-    });
-  }
-
-  private mergeActionArgs(
-    pinned: any,
-    useSite: any,
-    baseCtx: BaseCtx<AnyEventPayload, any>,
-    schema: z.ZodType<any> | undefined,
-  ): any {
-    const useArgs: Record<string, unknown> = {};
-    for (const k of Object.keys(useSite ?? {})) {
-      const v = (useSite as any)[k];
-      useArgs[k] = typeof v === 'function' ? v(baseCtx) : v;
-    }
-    const merged = { ...useArgs };
-    for (const k of Object.keys(pinned ?? {})) {
-      const v = (pinned as any)[k];
-      if (v !== undefined) merged[k] = v;
-    }
-    if (schema && typeof (schema as any).safeParse === 'function') {
-      const r = (schema as any).safeParse(merged);
-      if (r.success) return r.data;
-      throw r.error;
-    }
-    return merged;
-  }
-
   /* ============================================================ *
    * scheduled rule check
    * ============================================================ */
@@ -890,7 +413,7 @@ class EngineImpl implements RuleEngine {
       deliveryId: `scheduler:${rec.ruleId}:${rec.keyId}`,
       now: ranAt,
       logger: this.logger.child({ deliveryId: `scheduler:${rec.ruleId}:${rec.keyId}`, ruleId: rec.ruleId }),
-      integrations: this.bindIntegrations(registry, `scheduler:${rec.ruleId}:${rec.keyId}`),
+      integrations: bindIntegrations(registry, `scheduler:${rec.ruleId}:${rec.keyId}`),
     };
 
     let result: CheckResult;
@@ -913,15 +436,16 @@ class EngineImpl implements RuleEngine {
     }
 
     if (result.kind === 'pass') {
-      const baseCtx = this.makeBaseCtx(
-        { name: rule.eventName, payload: {} as any, deliveryId: checkCtx.deliveryId },
-        checkCtx.deliveryId,
-        ranAt,
-        controller.signal,
+      const baseCtx = makeBaseCtx({
+        envelope: { name: rule.eventName, payload: {} as any, deliveryId: checkCtx.deliveryId },
+        deliveryId: checkCtx.deliveryId,
+        startedAt: ranAt,
+        signal: controller.signal,
         registry,
-        rule.pinnedArgs,
-        rule.name,
-      );
+        args: rule.pinnedArgs,
+        logger: this.logger,
+        ruleId: rule.name,
+      });
       const scheduledView = {
         payload: rec.payload,
         scheduledAt: rec.scheduledAt,
@@ -936,7 +460,7 @@ class EngineImpl implements RuleEngine {
           const sched = action as RegisteredScheduledAction<string, any>;
           pending.push({
             fn: async () => {
-              const mergedArgs = this.mergeActionArgs(sched.pinnedArgs, att.args, baseCtx, sched.argsSchema);
+              const mergedArgs = mergeActionArgs(sched.pinnedArgs, att.args, baseCtx, sched.argsSchema);
               const schedCtx: ScheduledCtx<any> = {
                 args: mergedArgs,
                 signal: baseCtx.signal,
@@ -953,7 +477,7 @@ class EngineImpl implements RuleEngine {
           const plain = action as RegisteredAction<string, any>;
           pending.push({
             fn: async () => {
-              const mergedArgs = this.mergeActionArgs(plain.pinnedArgs, att.args, baseCtx, plain.argsSchema);
+              const mergedArgs = mergeActionArgs(plain.pinnedArgs, att.args, baseCtx, plain.argsSchema);
               const ctx = {
                 ...baseCtx,
                 args: mergedArgs,

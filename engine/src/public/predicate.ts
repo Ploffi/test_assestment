@@ -1,9 +1,12 @@
 /**
  * Predicate entity (ADR-002, ADR-004, ADR-016).
  *
- * Builder shape: `predicate(name).args(schema).fn(impl)` produces a
+ * Builder shape: `predicate(name).args(schema).fn(impl)` produces a callable
  * `PredicateFactory<Args>` that consumers call with optional registration
  * args to get a `RegisteredPredicate`.
+ *
+ * Builder settings are reusable: calling `.args(...)` or `.fn(...)` again
+ * replaces the previous value.
  *
  * Predicates are leaf-only — they cannot `use(...)` other predicates;
  * composition lives in `all` / `any` / `not` on the rule (ADR-004).
@@ -32,23 +35,20 @@ export interface RegisteredPredicate<
 }
 
 /* ============================================================ *
- * Progressive builder
+ * Reusable builder
  * ============================================================ */
 
-/** Initial step — `predicate(name)`. */
-export interface PredicateBuilder<Name extends string> {
+export interface PredicateBuilder<Name extends string, Args = unknown> {
   args<S extends z.ZodType>(schema: S): PredicateBuilderWithArgs<Name, z.infer<S>>;
-}
-
-/** After `.args(schema)`. */
-export interface PredicateBuilderWithArgs<Name extends string, Args> {
   fn(impl: PredicateImpl<Args>): PredicateFactory<Name, Args>;
 }
+
+export type PredicateBuilderWithArgs<Name extends string, Args> = PredicateFactory<Name, Args>;
 
 /**
  * Callable factory — invoking with optional registration args produces a
  * `RegisteredPredicate`. Args precedence: registration > use-site (ADR-002).
  */
-export type PredicateFactory<Name extends string, Args> = (
-  registrationArgs?: Partial<Args>,
-) => RegisteredPredicate<Name, Args>;
+export interface PredicateFactory<Name extends string, Args> extends PredicateBuilder<Name, Args> {
+  (registrationArgs?: Partial<Args>): RegisteredPredicate<Name, Args>;
+}

@@ -1,7 +1,7 @@
 /**
  * Rule entity (ADR-002, ADR-006, ADR-007, ADR-016).
  *
- * Builder shape, progressively narrowed:
+ * Builder shape:
  *
  *   rule(name)
  *     [ .args(schema) ]?
@@ -11,9 +11,10 @@
  *     .action(name, args?)+
  *     -> RuleFactory
  *
- * `.aggregate` and `.schedule` are mutually exclusive at the TYPE level
- * (each step lands in a builder variant that exposes only one of them).
- * The runtime also rejects the combination at `register()` (ADR-002).
+ * Builder settings are reusable: calling `.args(...)`, `.on(...)`, `.when(...)`,
+ * `.aggregate(...)`, or `.schedule(...)` again replaces the previous value.
+ * `.aggregate(...)` and `.schedule(...)` overwrite the strategy with the last
+ * call. `.action(...)` remains additive because rules support action chains.
  */
 
 import type { z } from 'zod';
@@ -111,20 +112,16 @@ export interface RegisteredRule<
 }
 
 /* ============================================================ *
- * Progressive builder
+ * Reusable builder
  * ============================================================ */
 
-/** Initial — `rule(name)`. `.args` is optional; `.on` is the next step. */
-export interface RuleBuilder<Name extends string> {
+export interface RuleBuilder<
+  Name extends string,
+  N extends WebhookEventName = WebhookEventName,
+  Args = unknown,
+> {
   args<S extends z.ZodType>(schema: S): RuleBuilderWithArgs<Name, z.infer<S>>;
-  on<N extends WebhookEventName>(eventName: N): RuleBuilderWithOn<Name, N, unknown>;
-}
-
-export interface RuleBuilderWithArgs<Name extends string, Args> {
-  on<N extends WebhookEventName>(eventName: N): RuleBuilderWithOn<Name, N, Args>;
-}
-
-export interface RuleBuilderWithOn<Name extends string, N extends WebhookEventName, Args> {
+  on<NextN extends WebhookEventName>(eventName: NextN): RuleBuilderWithOn<Name, NextN, Args>;
   /**
    * `.when` accepts either an inline `(ctx) => boolean` leaf or a structured
    * combinator tree (`all` / `any` / `not` / `use`). Single signature so TS
@@ -138,33 +135,47 @@ export interface RuleBuilderWithOn<Name extends string, N extends WebhookEventNa
       | NotNode<PayloadFor<N>, Args>
       | UseRef,
   ): RuleBuilderWithWhen<Name, N, Args>;
-}
-
-/** After `.when(...)`. Three forks: `.aggregate`, `.schedule`, or straight to `.action`. */
-export interface RuleBuilderWithWhen<Name extends string, N extends WebhookEventName, Args> {
   aggregate(cfg: AggregateConfig<N, Args>): RuleBuilderAggregating<Name, N, Args>;
   schedule(cfg: ScheduleConfig<N, Args>): RuleBuilderScheduling<Name, N, Args>;
   action(name: string, args?: Record<string, unknown>): RuleBuilderTerminal<Name, N, Args>;
+  (registrationArgs?: Partial<Args>): RegisteredRule<Name, N, Args>;
 }
 
-/** After `.aggregate(...)` — only `.action(...)` is reachable; `.schedule` is omitted. */
-export interface RuleBuilderAggregating<Name extends string, N extends WebhookEventName, Args> {
-  action(name: string, args?: Record<string, unknown>): RuleBuilderTerminal<Name, N, Args>;
-}
+export type RuleBuilderWithArgs<Name extends string, Args> = RuleBuilder<Name, WebhookEventName, Args>;
 
-/** After `.schedule(...)` — only `.action(...)` is reachable; `.aggregate` is omitted. */
-export interface RuleBuilderScheduling<Name extends string, N extends WebhookEventName, Args> {
-  action(name: string, args?: Record<string, unknown>): RuleBuilderTerminal<Name, N, Args>;
-}
+export type RuleBuilderWithOn<
+  Name extends string,
+  N extends WebhookEventName,
+  Args,
+> = RuleBuilder<Name, N, Args>;
+
+export type RuleBuilderWithWhen<
+  Name extends string,
+  N extends WebhookEventName,
+  Args,
+> = RuleBuilder<Name, N, Args>;
+
+export type RuleBuilderAggregating<
+  Name extends string,
+  N extends WebhookEventName,
+  Args,
+> = RuleBuilder<Name, N, Args>;
+
+export type RuleBuilderScheduling<
+  Name extends string,
+  N extends WebhookEventName,
+  Args,
+> = RuleBuilder<Name, N, Args>;
 
 /**
  * Terminal — can chain more `.action(...)` calls. Also callable as a factory
  * (invoke with registration args to get a `RegisteredRule`).
  */
-export interface RuleBuilderTerminal<Name extends string, N extends WebhookEventName, Args> {
-  action(name: string, args?: Record<string, unknown>): RuleBuilderTerminal<Name, N, Args>;
-  (registrationArgs?: Partial<Args>): RegisteredRule<Name, N, Args>;
-}
+export type RuleBuilderTerminal<
+  Name extends string,
+  N extends WebhookEventName,
+  Args,
+> = RuleBuilder<Name, N, Args>;
 
 /* ============================================================ *
  * Factory exported as `rule(name)`

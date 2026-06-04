@@ -13,3 +13,4 @@ export * from './rule.js';
 export * from './register.js';
 export * from './emitter.js';
 export * from './engine.js';
+export * from './builders.js';

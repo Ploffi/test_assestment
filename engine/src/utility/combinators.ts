@@ -14,7 +14,7 @@ import type {
   UseRef,
   WhenNode,
 } from '../public/combinators.js';
-import type { UseFactoryArgValue } from '../public/engine.js';
+import type { UseFactoryArgValue } from '../public/builders.js';
 import type { AnyEventPayload } from '../public/webhook.js';
 
 export function all<E extends AnyEventPayload, A>(

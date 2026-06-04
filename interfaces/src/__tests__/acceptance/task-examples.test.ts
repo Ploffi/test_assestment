@@ -26,6 +26,7 @@ import {
   action,
   integration,
   scheduledAction,
+  aggregatedAction,
   all,
   any,
   not,
@@ -128,8 +129,10 @@ describe('task.md #1 — PR opened, main, non-core, touches infra/', () => {
 describe('task.md #2 — 3 failing CI runs within 1h on same PR', () => {
   function build() {
     const recorded = vi.fn(async () => {});
-    const recordAction = action('record')
+    const recordAction = aggregatedAction('record')
+      .on('workflow_run.completed')
       .args(z.object({}))
+      .transform(() => ({}))
       .fn(recorded);
 
     const r = rule('flaky-pr-ci')
@@ -148,7 +151,7 @@ describe('task.md #2 — 3 failing CI runs within 1h on same PR', () => {
     const engine = createEngine({
       aggregationStore: createInMemoryAggregationStore(),
     });
-    engine.register({ actions: [recordAction({})], rules: [r()] });
+    engine.register({ aggregatedActions: [recordAction({})], rules: [r()] });
     return { engine, recorded };
   }
 
@@ -208,8 +211,10 @@ describe('task.md #2 — 3 failing CI runs within 1h on same PR', () => {
     // before the third arrives, so only 2 entries lie in `[now − 1h, now]`
     // at evaluation time of the third event.
     const recorded = vi.fn(async () => {});
-    const recordAction = action('record')
+    const recordAction = aggregatedAction('record')
+      .on('workflow_run.completed')
       .args(z.object({}))
+      .transform(() => ({}))
       .fn(recorded);
 
     const r = rule('flaky-pr-ci-windowed')
@@ -230,7 +235,7 @@ describe('task.md #2 — 3 failing CI runs within 1h on same PR', () => {
       aggregationStore: createInMemoryAggregationStore(),
       clock,
     });
-    engine.register({ actions: [recordAction({})], rules: [r()] });
+    engine.register({ aggregatedActions: [recordAction({})], rules: [r()] });
 
     const failingForPr = (prId: number) =>
       fakeEnvelope('workflow_run.completed', {

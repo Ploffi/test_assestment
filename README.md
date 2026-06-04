@@ -1,16 +1,16 @@
 # Air Automation Rule Engine Prototype
 
-This repository contains a TypeScript rule engine for filtering GitHub webhook events through code-as-config rules. The implementation lives in `interfaces/`; the ADRs in `adr/` document the design decisions and tradeoffs.
+This repository contains a TypeScript rule engine for filtering GitHub webhook events through code-as-config rules. The implementation lives in `engine/`; the ADRs in `adr/` document the design decisions and tradeoffs.
 
 ## Run It
 
 ```sh
-cd interfaces
+cd engine
 npm test
 npm run build
 ```
 
-`npm test` runs `tsc --noEmit` and the Vitest suite. `npm run build` emits the package entry under `interfaces/dist/`.
+`npm test` runs `tsc --noEmit` and the Vitest suite. `npm run build` emits the package entry under `engine/dist/`.
 
 ## DSL Shape
 

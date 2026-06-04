@@ -1,5 +1,5 @@
 /* Runtime utility implementations of the public `src/public` shapes that
- * are NOT engine-coupled — clock, logger, combinators, in-memory stores.
+ * are NOT engine-coupled — system clock, logger, combinators, in-memory stores.
  * Engine builders (`predicate`, `action`, `rule`, ...) and `createEngine`
  * itself live elsewhere; they need real evaluation logic, not just data
  * factories. */

@@ -5,6 +5,8 @@ import type {
   RegisterBatch,
   EvaluateOptions,
 } from '../public/engine.js';
+import type { Registry } from '../internal/registry.js';
+import type { MemoSlot } from '../internal/eval-context.js';
 import type {
   EngineEventName,
   EngineEventPayload,
@@ -55,24 +57,8 @@ import { parseDuration } from './duration.js';
 import { canonicalJson } from './canonical.js';
 import { attachIntegrationCallContext, buildAdapter } from './adapter.js';
 
-interface Registry {
-  predicates: Map<string, RegisteredPredicate<string, any>>;
-  actions: Map<string, RegisteredAction<string, any>>;
-  aggregatedActions: Map<string, RegisteredAggregatedAction<string, WebhookEventName, any, any>>;
-  scheduledActions: Map<string, RegisteredScheduledAction<string, any>>;
-  integrations: Map<string, RegisteredIntegration<string, any>>;
-  rules: Map<string, RegisteredRule<string, WebhookEventName, any>>;
-  actionByName: Map<string, AnyRegisteredAction>;
-  dispatch: Map<WebhookEventName, RegisteredRule<string, WebhookEventName, any>[]>;
-  adapters: Record<string, IntegrationAdapter<IntegrationMethods>>;
-}
-
 interface PendingAction {
   fn: () => Promise<void>;
-}
-
-interface MemoSlot {
-  promise: Promise<boolean>;
 }
 
 class EngineImpl implements RuleEngine {
@@ -1013,95 +999,4 @@ class EngineImpl implements RuleEngine {
 
 export function createEngine(opts: EngineOptions = {}): RuleEngine {
   return new EngineImpl(opts);
-}
-
-/* ============================================================ *
- * test helper
- * ============================================================ */
-
-function skeletonPayload(name: WebhookEventName): any {
-  switch (name) {
-    case 'workflow_run.completed':
-    case 'workflow_run.requested':
-      return {
-        action: name.split('.')[1],
-        workflow_run: {
-          id: 0,
-          html_url: '',
-          conclusion: 'success',
-          head_sha: '',
-          pull_requests: [],
-        },
-      };
-    case 'pull_request.opened':
-    case 'pull_request.closed':
-    case 'pull_request.reopened':
-    case 'pull_request.synchronize':
-    case 'pull_request.ready_for_review':
-      return {
-        action: name.split('.')[1],
-        pull_request: {
-          base: { ref: '' },
-          user: { login: '' },
-        },
-      };
-    case 'pull_request_review.submitted':
-      return { action: 'submitted', review: {} };
-    case 'issues.opened':
-    case 'issues.closed':
-    case 'issues.reopened':
-    case 'issues.edited':
-      return {
-        action: name.split('.')[1],
-        issue: {
-          id: 0,
-          html_url: '',
-          title: '',
-          state_reason: null,
-        },
-      };
-    case 'issue_comment.created':
-    case 'issue_comment.edited':
-      return {
-        action: name.split('.')[1],
-        issue: { id: 0 },
-        comment: { body: '', user: { login: '' } },
-      };
-    case 'check_run.completed':
-      return { action: 'completed', check_run: {} };
-    case 'release.published':
-    case 'release.edited':
-      return {
-        action: name.split('.')[1],
-        release: { tag_name: '', body: '' },
-      };
-    case 'push':
-      return {};
-    default:
-      return {};
-  }
-}
-
-function deepMerge(base: any, override: any): any {
-  if (override === null || override === undefined) return base;
-  if (typeof override !== 'object' || Array.isArray(override)) return override;
-  if (typeof base !== 'object' || base === null || Array.isArray(base)) return override;
-  const out: Record<string, any> = { ...base };
-  for (const k of Object.keys(override)) {
-    out[k] = deepMerge(base?.[k], (override as any)[k]);
-  }
-  return out;
-}
-
-export function fakeEnvelope<N extends WebhookEventName>(
-  name: N,
-  payload?: any,
-  deliveryId?: string,
-): EventEnvelope<N> {
-  const merged = deepMerge(skeletonPayload(name), payload ?? {});
-  return {
-    name,
-    payload: merged as any,
-    deliveryId: deliveryId ?? `delivery-${Math.random().toString(36).slice(2, 10)}`,
-  };
 }

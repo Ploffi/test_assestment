@@ -13,7 +13,7 @@
 import { describe, test, expect } from 'vitest';
 
 import { createInMemoryAggregationStore } from '../../utility/aggregation-store.js';
-import { createManualClock } from '../../utility/clock.js';
+import { createManualClock } from '../_helpers.js';
 import type { AggregationEntry } from '../../public/index.js';
 
 const entry = (at: number, deliveryId: string, payload: unknown = {}): AggregationEntry => ({

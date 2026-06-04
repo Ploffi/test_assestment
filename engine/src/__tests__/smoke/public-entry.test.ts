@@ -4,9 +4,9 @@ import { z } from 'zod';
 import {
   action,
   createEngine,
-  fakeEnvelope,
   rule,
 } from '../../index.js';
+import { fakeEnvelope } from '../_helpers.js';
 
 describe('package root entry', () => {
   test('exports runtime builders and createEngine', async () => {

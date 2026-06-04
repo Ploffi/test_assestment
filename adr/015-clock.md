@@ -48,9 +48,9 @@ const SystemClock: Clock = {
 
 This is installed when `EngineOptions.clock` is omitted. A consumer who never thinks about time gets a working engine.
 
-### Test implementation
+### Test implementations
 
-The engine package also exports a `ManualClock` for tests, used by the engine's own unit tests and re-exported for consumers:
+The public type surface defines a `ManualClock` shape for tests and other deterministic callers:
 
 ```ts
 interface ManualClock extends Clock {
@@ -59,7 +59,7 @@ interface ManualClock extends Clock {
 }
 ```
 
-`advance(ms)` walks the queue of pending `setTimeout` callbacks in `runAt` order, firing each whose deadline now lies in the past, before advancing the cursor. Callbacks scheduled during a firing callback are inserted into the same advance pass. This is the conventional fake-clock contract.
+The engine's own `createManualClock(...)` implementation lives in `src/__tests__` and is not exported from the runtime package. Consumers can provide their own implementation through `EngineOptions.clock`; `advance(ms)` should walk pending `setTimeout` callbacks in `runAt` order, firing each whose deadline now lies in the past before advancing the cursor. Callbacks scheduled during a firing callback should be inserted into the same advance pass. This is the conventional fake-clock contract.
 
 ### What goes through the Clock
 
@@ -92,6 +92,6 @@ interface ManualClock extends Clock {
 
 **Negative:**
 - One more option on `EngineOptions`, one more method to remember when the engine grows. Acceptable given how often time appears in this engine's semantics.
-- `ManualClock.advance` is conventional but subtle — callbacks scheduled during firing need correct ordering. The engine ships its own test suite for `ManualClock` to keep the contract honest.
+- `ManualClock.advance` is conventional but subtle — callbacks scheduled during firing need correct ordering. The engine keeps its own test-only implementation and test suite to keep the contract honest without exporting that helper as runtime API.
 - Mixing `clock.setTimeout` with `Promise`-based async means `await` boundaries do not magically yield to a fake clock; tests still need to `await` between `advance(...)` calls to let scheduled callbacks run. Documented in the engine test guide.
 - The lint rule (no direct `Date.now()` / `setTimeout` in engine code) is one more thing to maintain. Trivial; far cheaper than the bugs it prevents.

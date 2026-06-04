@@ -14,6 +14,8 @@ import type {
   RegisteredIntegration,
   RegisteredRule,
   AnyRegisteredAction,
+  IntegrationAdapter,
+  IntegrationMethods,
   WebhookEventName,
 } from '../public/index.js';
 
@@ -21,25 +23,28 @@ import type {
  * Phase-1 dispatch index: `event.name + '.' + event.action` → rules subscribed
  * via `.on(...)` (ADR-004).
  */
-export type DispatchIndex = ReadonlyMap<
+export type DispatchIndex = Map<
   WebhookEventName,
-  ReadonlyArray<RegisteredRule<string, WebhookEventName, any>>
+  RegisteredRule<string, WebhookEventName, any>[]
 >;
 
 export interface Registry {
-  readonly predicates: ReadonlyMap<string, RegisteredPredicate<string, any>>;
-  readonly actions: ReadonlyMap<string, RegisteredAction<string, any>>;
-  readonly aggregatedActions: ReadonlyMap<
+  readonly predicates: Map<string, RegisteredPredicate<string, any>>;
+  readonly actions: Map<string, RegisteredAction<string, any>>;
+  readonly aggregatedActions: Map<
     string,
     RegisteredAggregatedAction<string, WebhookEventName, any, any>
   >;
-  readonly scheduledActions: ReadonlyMap<string, RegisteredScheduledAction<string, any>>;
-  readonly integrations: ReadonlyMap<string, RegisteredIntegration<string, any>>;
-  readonly rules: ReadonlyMap<string, RegisteredRule<string, WebhookEventName, any>>;
+  readonly scheduledActions: Map<string, RegisteredScheduledAction<string, any>>;
+  readonly integrations: Map<string, RegisteredIntegration<string, any>>;
+  readonly rules: Map<string, RegisteredRule<string, WebhookEventName, any>>;
 
   /** Unified lookup: a `.action(name, ...)` reference can be any of three kinds. */
-  readonly actionByName: ReadonlyMap<string, AnyRegisteredAction>;
+  readonly actionByName: Map<string, AnyRegisteredAction>;
 
   /** Phase-1 dispatch (built once at register time). */
   readonly dispatch: DispatchIndex;
+
+  /** Resilience-wrapped integration adapters exposed as `ctx.integrations`. */
+  readonly adapters: Record<string, IntegrationAdapter<IntegrationMethods>>;
 }

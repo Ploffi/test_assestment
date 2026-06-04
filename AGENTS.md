@@ -7,32 +7,37 @@ A prototype rule engine that filters GitHub webhook events through code-as-confi
 ## Layout
 
 - `adr/` — Architecture Decision Records. Authoritative for design intent. Numbered; the README indexes them. Do **not** change the intent of an ADR; if behavior must change, write a follow-up ADR.
-- `interfaces/` — the npm package.
-  - `src/public/` — public type surface (engine API, DSL builder types, ctx shapes). Types only — no runtime.
-  - `src/internal/` — engine-internal types (registry, eval context, emitter).
-  - `src/utility/` — runtime implementations of public shapes that are **not** engine-coupled: `SystemClock` / `ManualClock`, no-op logger, combinator factories (`all` / `any` / `not` / `use`), in-memory `AggregationStore` / `ScheduledStore`.
-  - `src/engine/` — the engine itself: builder factories (`predicate` / `action` / `aggregatedAction` / `scheduledAction` / `rule` / `integration`), `createEngine`, `fakeEnvelope`, and the integration adapter.
-  - `src/__tests__/` — vitest suites: `utility/`, `smoke/`, `integration/`, `acceptance/`. Plus `_harness.ts` (re-exports the engine entry points the tests use) and `_fixtures.ts` (shared rule/predicate/action fixtures).
+- `engine/` — the npm package (`@air/engine`).
+  - `src/public/` — public API contracts and lightweight public runtime classes (engine API, DSL builder types, ctx shapes, register errors). This is the supported surface, not just types.
+  - `src/internal/` — engine-internal contracts used by the implementation (registry, eval context, emitter helpers). Do not export these from the package root.
+  - `src/utility/` — runtime implementations of public shapes that are **not** engine-coupled: `SystemClock`, no-op logger, combinator factories (`all` / `any` / `not` / `use`), in-memory `AggregationStore` / `ScheduledStore`.
+  - `src/engine/` — the engine itself: builder factories (`predicate` / `action` / `aggregatedAction` / `scheduledAction` / `rule` / `integration`), `createEngine`, and the integration adapter.
+  - `src/__tests__/` — vitest suites: `utility/`, `smoke/`, `integration/`, `acceptance`. Plus `_harness.ts` (test import seam), `_helpers.ts` (test-only implementations such as `createManualClock` / `fakeEnvelope`), and `_fixtures.ts` (shared rule/predicate/action fixtures).
 - `task.md` — the original assignment.
 
 ## Workflow
 
-- `npm test` (from `interfaces/`) — runs `tsc --noEmit` then the full vitest suite. This is the gate.
+- `npm test` (from `engine/`) — runs `tsc --noEmit` then the full vitest suite. This is the gate.
+- `npm run build` (from `engine/`) — emits the package to `engine/dist/`; `dist/` is ignored.
 - `npm run typecheck` — TypeScript only.
 - `npm run test:utility` / `npm run test:all` — narrower runs.
 
 ## Conventions
 
 - **ADRs are the contract.** Tests encode them. When tests and intuition disagree, re-read the ADR first.
-- **Public types live in `src/public/`** and are types-only. Runtime code that depends on the public surface goes in `src/utility/` (entity-agnostic) or `src/engine/` (engine-coupled).
+- **The supported public surface lives in `src/public/` plus runtime exports from `src/engine/index.ts`.** Runtime code that implements public shapes goes in `src/utility/` (entity-agnostic) or `src/engine/` (engine-coupled).
 - `_harness.ts` is the seam tests import through. If the engine grows a new entry point a test needs, re-export it there rather than importing from `src/engine/` directly in each test.
+- Test-only helpers belong in `src/__tests__/_helpers.ts`; keep them out of package root exports and `src/utility/`.
 - ESM with `.js` import suffixes — TypeScript is configured for `"moduleResolution": "Bundler"` with `verbatimModuleSyntax: false`, but the codebase keeps `.js` suffixes for portability.
-- Zod is the args schema validator; the engine validates pinned args as **partial** (registration args may supply only some keys) and re-validates the merged use-site + registration args at evaluate time.
+- Zod is the args schema validator; predicates/actions validate pinned args as **partial** (registration args may supply only some keys) and re-validate merged use-site + registration args at evaluate time. Rule args are complete at registration because rules have no use-site merge.
+- `node_modules/` and `dist/` are intentionally ignored. Do not commit generated dependency or build output.
 
 ## Things that bite
 
 - `register()` runs two passes (dependency-graph + schema) and throws an aggregated `RegistrationError` with every issue. Don't fail-fast.
 - Predicate errors **isolate to `false`** — they never reject `evaluate()`. Action errors **do** reject (aggregated via `AggregateError` when multiple).
 - `ctx.now` is frozen at evaluation start. Engine code uses the injected `Clock`, never `Date.now()` / global `setTimeout`.
+- Test-only helpers such as `createManualClock` and `fakeEnvelope` live under `src/__tests__/`; do not export them from the runtime package.
 - Scheduled-rule poll cadence is clamped to a **10s floor** (ADR-007). The in-memory scheduler re-arms its next tick synchronously so cascades survive a `ManualClock.advance(...)` sweep, and uses store leases to dedup claims.
 - Per-event predicate memoization keys on `(name, canonicalJSON(merged args))`. Args precedence: **registration > use-site**.
+- Integration adapters own external-call resilience: cache, concurrency, circuit breaker, retry, and `external.call` emitter events. Engine-side predicate memoization is still per event only.

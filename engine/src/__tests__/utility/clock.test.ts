@@ -1,5 +1,5 @@
 /**
- * Unit tests for `SystemClock` + `ManualClock` (ADR-015).
+ * Unit tests for `SystemClock` and the test-only `ManualClock` helper (ADR-015).
  */
 
 import { describe, test, expect } from 'vitest';
@@ -7,8 +7,8 @@ import { describe, test, expect } from 'vitest';
 import {
   SystemClock,
   createSystemClock,
-  createManualClock,
 } from '../../utility/clock.js';
+import { createManualClock } from '../_helpers.js';
 
 describe('SystemClock', () => {
   test('now() returns a millisecond timestamp around Date.now()', () => {

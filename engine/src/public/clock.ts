@@ -9,7 +9,7 @@ export interface Timer {
  * Injectable time source (ADR-015).
  *
  * Engine code never calls global `Date.now()` or `setTimeout` directly;
- * it goes through this interface so tests can pin time with `ManualClock`.
+ * it goes through this interface so tests can pin time with a fake clock.
  *
  * Default implementation is `SystemClock` — real wall clock + Node timers.
  */
@@ -21,7 +21,9 @@ export interface Clock {
 }
 
 /**
- * Test clock — exposed by the engine package for consumer tests too.
+ * Test-clock shape. The engine accepts any implementation through
+ * `EngineOptions.clock`; the package's own test implementation lives under
+ * `src/__tests__` so it is not part of the runtime bundle.
  *
  * `advance(ms)` walks queued timeouts in `runAt` order, firing each whose
  * deadline now lies in the past. Callbacks scheduled during a firing

@@ -27,10 +27,8 @@ export type MemoKey = string;
 /** The in-flight or settled Promise for one `(predicate, args)` resolution. */
 export type MemoEntry = Promise<boolean>;
 
-/** Pre-resolved args + the live Promise for a predicate invocation. */
+/** The live Promise for one predicate invocation. */
 export interface MemoSlot {
-  /** Stable JSON of the merged + validated args, for the hash. */
-  argsHash: string;
   /** In-flight or settled. `false` on any throw per ADR-004 error isolation. */
   promise: MemoEntry;
 }

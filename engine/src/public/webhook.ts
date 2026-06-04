@@ -24,7 +24,7 @@ import type {
  *
  * Consumers can extend through TypeScript declaration merging:
  *
- *   declare module '@air/interfaces' {
+ *   declare module '@air/engine' {
  *     interface EventPayloadMap {
  *       'discussion.created': DiscussionCreatedEvent;
  *     }

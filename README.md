@@ -12,6 +12,15 @@ npm run build
 
 `npm test` runs `tsc --noEmit` and the Vitest suite. `npm run build` emits the package entry under `engine/dist/`.
 
+The `demo/` package is a minimal Fastify webhook ingress that accepts signed GitHub hooks and evaluates them through the engine:
+
+```sh
+cd demo
+npm install
+npm test
+GITHUB_WEBHOOK_SECRET=dev-secret npm run dev
+```
+
 ## DSL Shape
 
 Rules are TypeScript values built with fluent builders:

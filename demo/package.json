@@ -1,0 +1,24 @@
+{
+  "name": "@air/demo",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:engine": "npm --prefix ../engine run build",
+    "dev": "npm run build:engine && tsx src/index.ts",
+    "typecheck:local": "tsc --noEmit",
+    "typecheck": "npm run build:engine && npm run typecheck:local",
+    "test": "npm run build:engine && npm run typecheck:local && vitest run"
+  },
+  "dependencies": {
+    "@air/engine": "file:../engine",
+    "fastify": "^5.6.2",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}

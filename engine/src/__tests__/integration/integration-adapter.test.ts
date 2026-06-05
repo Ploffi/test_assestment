@@ -318,4 +318,117 @@ describe('integration adapter — shared resilience layers', () => {
       { deliveryId: 'delivery-b', cacheHit: true, ok: true },
     ]);
   });
+
+  test('cache handles null inputs and evicts least-recently-used entries at max size', async () => {
+    const events: Array<{ deliveryId: string; cacheHit: boolean }> = [];
+    const underlying = vi.fn(async (_i: null | { key: string; signal?: AbortSignal }) => ({ ok: true }));
+    const probe = integration('probe')
+      .cache({ ttl: '1d', max: 1 })
+      .methods({ get: underlying });
+    const a = action('a')
+      .args(z.object({}))
+      .fn(async (ctx) => {
+        const ref = (ctx.event as any).ref as string;
+        const input = ref === 'none' ? null : { key: ref, signal: ctx.signal };
+        await ctx.integrations['probe']?.['get'](input);
+      });
+    const r = rule('r').on('push').when(() => true).action('a');
+    const engine = createEngine();
+    engine.on('external.call', (event) => events.push({ deliveryId: event.deliveryId, cacheHit: event.cacheHit }));
+    engine.register({ integrations: [probe], actions: [a({})], rules: [r()] });
+
+    await engine.evaluate(fakeEnvelope('push', { ref: 'none' } as any, 'delivery-null-1'));
+    await engine.evaluate(fakeEnvelope('push', { ref: 'other' } as any, 'delivery-other'));
+    await engine.evaluate(fakeEnvelope('push', { ref: 'none' } as any, 'delivery-null-2'));
+
+    expect(underlying).toHaveBeenCalledTimes(3);
+    expect(events).toEqual([
+      { deliveryId: 'unknown', cacheHit: false },
+      { deliveryId: 'delivery-other', cacheHit: false },
+      { deliveryId: 'unknown', cacheHit: false },
+    ]);
+  });
+
+  test('retry backoff waits on the injected clock before re-attempting', async () => {
+    const clock = createManualClock(0);
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+    const underlying = vi
+      .fn<() => Promise<{ ok: true }>>()
+      .mockRejectedValueOnce(new Error('transient'))
+      .mockResolvedValueOnce({ ok: true });
+    const probe = integration('probe')
+      .retry({ attempts: 2, backoffMs: 100, jitter: true })
+      .methods({ get: async (_i: { signal?: AbortSignal }) => underlying() });
+    const a = action('a')
+      .args(z.object({}))
+      .fn(async (ctx) => {
+        await ctx.integrations['probe']?.['get']({ signal: ctx.signal });
+      });
+    const r = rule('r').on('push').when(() => true).action('a');
+    const engine = createEngine({ clock });
+    engine.register({ integrations: [probe], actions: [a({})], rules: [r()] });
+
+    const evaluation = engine.evaluate(fakeEnvelope('push'));
+    await new Promise((r) => setImmediate(r));
+    expect(underlying).toHaveBeenCalledTimes(1);
+
+    clock.advance(100);
+    await evaluation;
+    expect(underlying).toHaveBeenCalledTimes(2);
+    random.mockRestore();
+  });
+
+  test('retry backoff rejects immediately when the adapter input signal is already aborted', async () => {
+    const underlying = vi.fn(async () => {
+      throw new Error('transient');
+    });
+    const probe = integration('probe')
+      .retry({ attempts: 2, backoffMs: 100 })
+      .methods({ get: async (_i: { signal?: AbortSignal }) => underlying() });
+    const a = action('a')
+      .args(z.object({}))
+      .fn(async (ctx) => {
+        const ac = new AbortController();
+        ac.abort();
+        await ctx.integrations['probe']?.['get']({ signal: ac.signal });
+      });
+    const r = rule('r').on('push').when(() => true).action('a');
+    const engine = createEngine();
+    engine.register({ integrations: [probe], actions: [a({})], rules: [r()] });
+
+    await expect(engine.evaluate(fakeEnvelope('push'))).rejects.toThrow(/aborted/);
+    expect(underlying).toHaveBeenCalledTimes(1);
+  });
+
+  test('half-open breaker failure reopens the breaker and fails fast again', async () => {
+    const clock = createManualClock(0);
+    let calls = 0;
+    const probe = integration('probe')
+      .breaker({ errorThresholdPct: 50, resetMs: 100 })
+      .methods({
+        get: async (_i: { signal?: AbortSignal }) => {
+          calls++;
+          throw new Error('still down');
+        },
+      });
+    const p = predicate('p')
+      .args(z.object({}))
+      .fn(async (ctx) => Boolean(await ctx.integrations['probe']?.['get']({ signal: ctx.signal })));
+    const fired = vi.fn(async () => {});
+    const a = action('a').args(z.object({})).fn(fired);
+    const r = rule('r').on('push').when(use('p')).action('a');
+    const engine = createEngine({ clock });
+    engine.register({ integrations: [probe], predicates: [p({})], actions: [a({})], rules: [r()] });
+
+    await engine.evaluate(fakeEnvelope('push', undefined, 'd1'));
+    await engine.evaluate(fakeEnvelope('push', undefined, 'd2'));
+    expect(calls).toBe(1);
+
+    clock.advance(100);
+    await engine.evaluate(fakeEnvelope('push', undefined, 'd3'));
+    await engine.evaluate(fakeEnvelope('push', undefined, 'd4'));
+
+    expect(calls).toBe(2);
+    expect(fired).not.toHaveBeenCalled();
+  });
 });

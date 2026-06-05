@@ -21,6 +21,7 @@ import {
   createManualClock,
   fakeEnvelope,
   rule,
+  action,
   scheduledAction,
 } from '../_harness.js';
 import type {
@@ -75,7 +76,7 @@ describe('scheduled — enqueue on evaluate()', () => {
       .on('issues.closed')
       .when(() => true)
       .schedule({
-        delay: '5m',
+        delay: '250ms',
         key: () => 'issue-1',
         transform: () => ({ marker: 'x' }),
         check: async () => ({ kind: 'pass' }),
@@ -89,6 +90,7 @@ describe('scheduled — enqueue on evaluate()', () => {
     await engine.evaluate(fakeEnvelope('issues.closed'));
     expect(store.calls.enqueued.length).toBe(1);
     expect(store.calls.enqueued[0]?.keyId).toBe('issue-1');
+    expect(store.calls.enqueued[0]?.runAt).toBe(1_000_250);
     expect(fired).not.toHaveBeenCalled();
   });
 
@@ -185,6 +187,44 @@ describe('scheduled — check outcomes', () => {
     await engine.stop();
   });
 
+  test('`pass` can run attached scheduled and plain actions with the scheduled payload', async () => {
+    const store = trackingStore();
+    const scheduledFired = vi.fn(async () => {});
+    let plainObserved: unknown;
+    const sched = scheduledAction('sched-act').args(z.object({})).fn(scheduledFired);
+    const plain = action('plain-act')
+      .args(z.object({}))
+      .fn(async (ctx) => {
+        plainObserved = (ctx as any).scheduled.payload;
+      });
+
+    const r = rule('r')
+      .on('issues.closed')
+      .when(() => true)
+      .schedule({
+        delay: '1s',
+        key: () => 'k',
+        transform: () => ({ marker: 'scheduled-payload' }),
+        check: async () => ({ kind: 'pass' }),
+      })
+      .action('sched-act')
+      .action('plain-act');
+
+    const clock = createManualClock(0);
+    const engine = createEngine({ scheduledStore: store, clock });
+    engine.register({ scheduledActions: [sched({})], actions: [plain({})], rules: [r()] });
+    engine.start();
+
+    await engine.evaluate(fakeEnvelope('issues.closed'));
+    clock.advance(11_000);
+    await new Promise((r) => setImmediate(r));
+
+    expect(scheduledFired).toHaveBeenCalledTimes(1);
+    expect(plainObserved).toEqual({ marker: 'scheduled-payload' });
+    expect(store.calls.removed.length).toBe(1);
+    await engine.stop();
+  });
+
   test("`skip` removes the record without firing any action", async () => {
     const store = trackingStore();
     const fired = vi.fn(async () => {});
@@ -198,6 +238,38 @@ describe('scheduled — check outcomes', () => {
         key: () => 'k',
         transform: () => ({}),
         check: async () => ({ kind: 'skip' }),
+      })
+      .action('sched-act');
+
+    const clock = createManualClock(0);
+    const engine = createEngine({ scheduledStore: store, clock });
+    engine.register({ scheduledActions: [act({})], rules: [r()] });
+    engine.start();
+
+    await engine.evaluate(fakeEnvelope('issues.closed'));
+    clock.advance(5 * 60_000 + 11_000);
+    await new Promise((r) => setImmediate(r));
+
+    expect(fired).not.toHaveBeenCalled();
+    expect(store.calls.removed.length).toBe(1);
+    await engine.stop();
+  });
+
+  test('check failure is isolated to skip and removes the record', async () => {
+    const store = trackingStore();
+    const fired = vi.fn(async () => {});
+    const act = scheduledAction('sched-act').args(z.object({})).fn(fired);
+
+    const r = rule('r')
+      .on('issues.closed')
+      .when(() => true)
+      .schedule({
+        delay: '5m',
+        key: () => 'k',
+        transform: () => ({}),
+        check: async () => {
+          throw new Error('check failed');
+        },
       })
       .action('sched-act');
 
@@ -327,6 +399,34 @@ describe('scheduled — payload + ctx shape', () => {
 });
 
 describe('scheduled — claim contract', () => {
+  test('scheduler ticks before register do not claim work', async () => {
+    const store = trackingStore();
+    const clock = createManualClock(0);
+    const engine = createEngine({ scheduledStore: store, clock });
+    engine.start();
+
+    clock.advance(11_000);
+    await new Promise((r) => setImmediate(r));
+
+    expect(store.calls.claimed).toBe(0);
+    await engine.stop();
+  });
+
+  test('orphaned scheduled records are removed when their rule is no longer registered', async () => {
+    const store = trackingStore();
+    await store.enqueue('missing-rule', 'k', 1_000, {}, 0);
+    const clock = createManualClock(0);
+    const engine = createEngine({ scheduledStore: store, clock });
+    engine.register({ rules: [] });
+    engine.start();
+
+    clock.advance(11_000);
+    await new Promise((r) => setImmediate(r));
+
+    expect(store.calls.removed).toEqual([{ ruleId: 'missing-rule', keyId: 'k' }]);
+    await engine.stop();
+  });
+
   test('engine never claims below the 10s floor (ADR-007)', async () => {
     const store = trackingStore();
     const engine = createEngine({

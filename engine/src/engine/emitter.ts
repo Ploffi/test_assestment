@@ -3,6 +3,11 @@ import type {
   EngineEventPayload,
 } from '../public/emitter.js';
 
+export type EngineEmit = <N extends EngineEventName>(
+  eventName: N,
+  payload: EngineEventPayload<N>,
+) => void;
+
 export class EngineEmitter {
   private subs: Map<string, Set<(p: any) => void>> = new Map();
 

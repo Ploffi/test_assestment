@@ -22,6 +22,7 @@ import {
   rule,
   predicate,
   action,
+  scheduledAction,
   use,
 } from '../_harness.js';
 import {
@@ -159,6 +160,28 @@ describe('engine.evaluate — rejects on action failure', () => {
       expect(caught.errors.length).toBe(2);
     }
   });
+
+  test('normalizes non-Error parallel action throws in the aggregate rejection', async () => {
+    const a = action('string-throw').args(z.object({})).fn(async () => {
+      throw 'string failure';
+    });
+    const b = action('number-throw').args(z.object({})).fn(async () => {
+      throw 42;
+    });
+    const r = rule('r').on('push').when(() => true).action('string-throw').action('number-throw');
+    const engine = createEngine();
+    engine.register({ actions: [a({}), b({})], rules: [r()] });
+
+    let caught: unknown;
+    try {
+      await engine.evaluate(fakeEnvelope('push'));
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(caught).toBeInstanceOf(AggregateError);
+    expect((caught as AggregateError).errors.every((e) => e instanceof Error)).toBe(true);
+  });
 });
 
 describe('engine.evaluate — predicate errors do NOT reject', () => {
@@ -188,6 +211,19 @@ describe('engine.evaluate — predicate errors do NOT reject', () => {
 });
 
 describe('engine.evaluate — cancellation', () => {
+  test('already-aborted caller signal rejects before launching actions', async () => {
+    const fired = vi.fn(async () => {});
+    const a = action('a').args(z.object({})).fn(fired);
+    const r = rule('r').on('push').when(() => true).action('a');
+    const engine = createEngine();
+    engine.register({ actions: [a({})], rules: [r()] });
+    const ac = new AbortController();
+    ac.abort('caller stopped');
+
+    await expect(engine.evaluate(fakeEnvelope('push'), { signal: ac.signal })).rejects.toThrow(/aborted/);
+    expect(fired).not.toHaveBeenCalled();
+  });
+
   test('caller AbortSignal composes with engine deadline', async () => {
     const slow = action('slow')
       .args(z.object({}))
@@ -270,6 +306,50 @@ describe('engine.evaluate — args validation', () => {
     await expect(engine.evaluate(fakeEnvelope('push'))).rejects.toThrow();
     expect(fired).not.toHaveBeenCalled();
   });
+
+  test('invalid schedule duration rejects during evaluation', async () => {
+    const sched = scheduledAction('sched')
+      .args(z.object({}))
+      .fn(async () => {});
+    const r = rule('r')
+      .on('issues.closed')
+      .when(() => true)
+      .schedule({
+        delay: 'soon',
+        key: () => 'k',
+        transform: () => ({}),
+        check: async () => ({ kind: 'pass' }),
+      })
+      .action('sched');
+    const engine = createEngine();
+    engine.register({ scheduledActions: [sched({})], rules: [r()] });
+
+    await expect(engine.evaluate(fakeEnvelope('issues.closed'))).rejects.toThrow(/invalid duration/);
+  });
+});
+
+describe('engine.evaluate — predicate memo keys', () => {
+  test('canonicalizes nulls, arrays, and function values in predicate args', async () => {
+    const p = predicate('complex-args')
+      .args(z.object({ nil: z.any(), arr: z.any(), fn: z.any() }))
+      .fn(async (ctx) => ctx.args.nil === null && Array.isArray(ctx.args.arr) && typeof ctx.args.fn === 'function');
+    const fired = vi.fn(async () => {});
+    const a = action('a').args(z.object({})).fn(fired);
+    const r = rule('r')
+      .on('push')
+      .when(use('complex-args', {
+        nil: null,
+        arr: [1, 2],
+        fn: () => () => true,
+      }))
+      .action('a');
+    const engine = createEngine();
+    engine.register({ predicates: [p({})], actions: [a({})], rules: [r()] });
+
+    await engine.evaluate(fakeEnvelope('push'));
+
+    expect(fired).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('engine.evaluate — logger scoping', () => {
@@ -300,6 +380,52 @@ describe('engine.evaluate — logger scoping', () => {
       deliveryId: 'delivery-logger',
       ruleId: 'r',
       actionName: 'a',
+    });
+  });
+
+  test('action ctx includes repo/installation shortcuts and resolves dynamic action args', async () => {
+    let observed:
+      | {
+        installationId?: number;
+        repoId?: number;
+        repoFullName?: string;
+        issueId?: number;
+        channel?: string;
+      }
+      | undefined;
+    const a = action('ctx-shape')
+      .args(z.object({ issueId: z.number(), channel: z.string().optional() }))
+      .fn(async (ctx) => {
+        observed = {
+          installationId: ctx.installation?.id,
+          repoId: ctx.repo?.id,
+          repoFullName: ctx.repo?.fullName,
+          issueId: ctx.args.issueId,
+          channel: ctx.args.channel,
+        };
+      });
+    const r = rule('ctx-shape')
+      .on('issues.opened')
+      .when(() => true)
+      .action('ctx-shape', {
+        issueId: (ctx: any) => ctx.event.issue.id,
+        channel: '#use-site',
+      });
+    const engine = createEngine();
+    engine.register({ actions: [a({ channel: undefined })], rules: [r()] });
+
+    await engine.evaluate(fakeEnvelope('issues.opened', {
+      issue: { id: 77 },
+      installation: { id: 123 },
+      repository: {},
+    } as any));
+
+    expect(observed).toEqual({
+      installationId: 123,
+      repoId: 0,
+      repoFullName: '',
+      issueId: 77,
+      channel: '#use-site',
     });
   });
 });

@@ -138,6 +138,28 @@ describe('aggregation — threshold reached', () => {
     expect(store.calls.appended[0]?.[2]).toBe('pr-42');
   });
 
+  test('custom .aggregate.at(ctx) controls the stored entry timestamp', async () => {
+    const store = trackingStore();
+    const agg = aggregatedAction('agg')
+      .on('workflow_run.completed')
+      .args(z.object({}))
+      .transform(() => ({}))
+      .fn(async () => {});
+
+    const r = rule('r')
+      .on('workflow_run.completed')
+      .when(() => true)
+      .aggregate({ window: '1h', count: 3, key: () => 'pr-42', at: () => 123_456 })
+      .action('agg');
+
+    const engine = createEngine({ aggregationStore: store });
+    engine.register({ aggregatedActions: [agg({})], rules: [r()] });
+
+    await engine.evaluate(fakeEnvelope('workflow_run.completed'));
+
+    expect(store.calls.appended[0]?.[3].at).toBe(123_456);
+  });
+
   test('two distinct keys live in separate buckets (different threshold timelines)', async () => {
     const store = createInMemoryAggregationStore();
     const fireCounts = { 'pr-A': 0, 'pr-B': 0 };

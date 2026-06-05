@@ -14,6 +14,7 @@ import {
   rule,
   action,
   aggregatedAction,
+  not,
   use,
 } from '../_harness.js';
 import {
@@ -161,6 +162,55 @@ describe('engine.register — failure: dependency graph (pass 1)', () => {
     expect(caught).toBeInstanceOf(RegistrationError);
     expect(
       (caught as RegistrationError).issues.some((i) => i.code === 'kind-mismatch'),
+    ).toBe(true);
+  });
+
+  test('kind-mismatch when aggregatedAction attaches to a non-aggregating rule', () => {
+    const agg = aggregatedAction('agg-on-plain')
+      .on('push')
+      .args(z.object({}))
+      .transform(() => ({}))
+      .fn(async () => {});
+    const plainRule = rule('plain')
+      .on('push')
+      .when(() => true)
+      .action('agg-on-plain');
+
+    const engine = createEngine();
+    let caught: unknown;
+    try {
+      engine.register({
+        aggregatedActions: [agg({})],
+        rules: [plainRule()],
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(RegistrationError);
+    expect(
+      (caught as RegistrationError).issues.some((i) => i.code === 'kind-mismatch'),
+    ).toBe(true);
+  });
+
+  test('unknown-predicate is discovered inside not(...) nodes', () => {
+    const orphan = rule('not-orphan')
+      .on('push')
+      .when(not(use('does_not_exist')))
+      .action('notify-slack');
+
+    const engine = createEngine();
+    let caught: unknown;
+    try {
+      engine.register({
+        actions: [notifySlack({ channel: '#x' })],
+        rules: [orphan()],
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(RegistrationError);
+    expect(
+      (caught as RegistrationError).issues.some((i) => i.code === 'unknown-predicate'),
     ).toBe(true);
   });
 

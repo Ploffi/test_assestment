@@ -109,6 +109,8 @@ Compared to `aggregatedAction`:
 
 Separate from `AggregationStore` ([ADR-006](006-aggregation-windows.md)) — the operations are too different to share one interface (atomic claim with lease, mutation/reschedule, delete-on-completion vs. append-only window queries). Same swap-out pattern: default in-memory, drop-in Redis or SQLite. A consumer can serve both stores from one backend with separate key schemas.
 
+Short review of the storage boundary: both aggregation and scheduling are keyed and time-based, so they can share one physical backend, but they do not share one minimal CRUD shape. Aggregation needs a multi-entry time-series primitive: append projected entries and count/list entries in a time window. Scheduling needs a singleton due-record primitive: replace one pending record per `(ruleId, keyId)`, atomically claim due records with a lease, then remove or reschedule them. A generic key/timestamp store would still need to expose those two operation families, otherwise the engine would have to rebuild atomic threshold checks and distributed scheduler claiming outside the storage contract.
+
 ```ts
 interface ScheduledStore {
   // Enqueue a deferred check. Replaces any existing record for (ruleId, keyId).

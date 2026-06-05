@@ -315,7 +315,7 @@ describe('scheduled — payload + ctx shape', () => {
     await engine.evaluate(
       fakeEnvelope('issues.closed', {
         issue: { id: 42, html_url: 'https://x/y/issues/42' },
-      } as any),
+      }),
     );
     clock.advance(11_000);
     await new Promise((r) => setImmediate(r));

@@ -5,5 +5,4 @@ export {
   createInMemoryAggregationStore,
   createInMemoryScheduledStore,
   createSystemClock,
-  createNoopLogger,
 } from '../utility/index.js';

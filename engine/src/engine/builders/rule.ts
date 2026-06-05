@@ -75,8 +75,8 @@ export function rule<Name extends string>(name: Name): RuleBuilder<Name> {
       kind: 'aggregate',
       window: cfg.window,
       count: cfg.count,
-      key: cfg.key as any,
-      ...(cfg.at !== undefined ? { at: cfg.at as any } : {}),
+      key: cfg.key,
+      ...(cfg.at !== undefined ? { at: cfg.at } : {}),
     };
     return builder as RuleBuilderTerminal<Name, N, Args>;
   };
@@ -85,8 +85,8 @@ export function rule<Name extends string>(name: Name): RuleBuilder<Name> {
       kind: 'schedule',
       delay: cfg.delay,
       ...(cfg.deadline !== undefined ? { deadline: cfg.deadline } : {}),
-      key: cfg.key as any,
-      transform: cfg.transform as any,
+      key: cfg.key,
+      transform: cfg.transform,
       check: cfg.check,
     };
     return builder as RuleBuilderTerminal<Name, N, Args>;

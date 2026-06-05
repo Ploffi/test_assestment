@@ -88,7 +88,7 @@ describe('use(name, args?)', () => {
   });
 
   test('callback args are preserved by reference (engine resolves at evaluate time)', () => {
-    const cb = (ctx: any) => ctx.event.foo;
+    const cb = (ctx: { event: { foo: string } }) => ctx.event.foo;
     const ref = use('p', { login: cb });
     expect((ref.args as { login: unknown }).login).toBe(cb);
   });

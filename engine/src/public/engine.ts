@@ -39,7 +39,7 @@ export interface EngineOptions {
   /** Time source — default `SystemClock` (ADR-015). */
   clock?: Clock;
 
-  /** Pino-compatible logger — default no-op (ADR-011). */
+  /** Pino-compatible logger — default `console` wrapper. */
   logger?: Logger;
 
   /** Per-evaluation watchdog deadline; default 15_000. */

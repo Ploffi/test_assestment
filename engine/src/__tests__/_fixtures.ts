@@ -18,6 +18,7 @@ import {
   not,
   use,
 } from './_harness.js';
+import type { RuleCtx } from './_harness.js';
 
 /* ============================================================ *
  * Integrations
@@ -135,7 +136,7 @@ export const infraPrFromOutsider = rule('infra-pr-from-outsider')
       not(
         use('is_team_member', {
           team: 'core',
-          login: (ctx: any) => ctx.event.pull_request.user.login,
+          login: (ctx: RuleCtx<'pull_request.opened'>) => ctx.event.pull_request.user.login,
         }),
       ),
       use('touches_paths', { glob: 'infra/**' }),

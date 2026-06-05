@@ -10,6 +10,7 @@
  */
 
 import { describe, test, expect, vi } from 'vitest';
+import { z } from 'zod';
 
 import {
   createEngine,
@@ -149,7 +150,7 @@ describe('engine.on / engine.off — subscribe lifecycle', () => {
     const a = vi.fn((_e: RuleMatchedEvent) => {});
     const b = vi.fn((_e: RuleMatchedEvent) => {});
 
-    const aRule = action('a').args({} as any).fn(async () => {});
+    const aRule = action('a').args(z.object({})).fn(async () => {});
     const r = rule('r').on('push').when(() => true).action('a');
     const engine = createEngine();
     engine.register({ actions: [aRule({})], rules: [r()] });

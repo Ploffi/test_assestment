@@ -18,7 +18,8 @@ export {
   createInMemoryAggregationStore,
   createInMemoryScheduledStore,
   createSystemClock,
-  createNoopLogger,
+  createConsoleLogger,
 } from '../index.js';
 
 export { createManualClock, fakeEnvelope } from './_helpers.js';
+export type { DeepPartial, RuleCtx } from './_helpers.js';

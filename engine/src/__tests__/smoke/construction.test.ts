@@ -12,7 +12,7 @@ import {
   createInMemoryAggregationStore,
   createInMemoryScheduledStore,
   createManualClock,
-  createNoopLogger,
+  createConsoleLogger,
 } from '../_harness.js';
 import type { RuleEngine } from '../../public/index.js';
 
@@ -32,7 +32,7 @@ describe('engine.construction', () => {
       aggregationStore: createInMemoryAggregationStore(),
       scheduledStore: createInMemoryScheduledStore(),
       clock: createManualClock(0),
-      logger: createNoopLogger(),
+      logger: createConsoleLogger(),
       evaluationTimeoutMs: 5_000,
       scheduledPollMs: 30_000,
     });

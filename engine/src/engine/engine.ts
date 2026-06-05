@@ -4,6 +4,7 @@ import type {
   RegisterBatch,
   EvaluateOptions,
 } from '../public/engine.js';
+import { createConsoleLogger } from '../public/logger.js';
 import type { Registry } from '../internal/registry.js';
 import type { MemoSlot } from '../internal/eval-context.js';
 import type {
@@ -27,10 +28,13 @@ import type {
   CheckCtx,
   CheckResult,
   RuleStrategy,
+  ScheduledCheck,
+  AnyEventPayload,
+  BaseCtx,
+  ScheduledView,
 } from '../public/index.js';
 
 import { SystemClock } from '../utility/clock.js';
-import { createNoopLogger } from '../utility/logger.js';
 import { createInMemoryAggregationStore } from '../utility/aggregation-store.js';
 import { createInMemoryScheduledStore } from '../utility/scheduled-store.js';
 import { parseDuration } from './duration.js';
@@ -44,6 +48,10 @@ import {
   queuePlainAction,
 } from './actions.js';
 import { evaluateWhen } from './predicates.js';
+
+type ScheduledPlainActionCtx = BaseCtx<AnyEventPayload, unknown> & {
+  scheduled: ScheduledView;
+};
 
 class EngineImpl implements RuleEngine {
   private clock: Clock;
@@ -64,7 +72,7 @@ class EngineImpl implements RuleEngine {
     this.clock = opts.clock ?? SystemClock;
     this.aggStore = opts.aggregationStore ?? createInMemoryAggregationStore({ clock: this.clock });
     this.schedStore = opts.scheduledStore ?? createInMemoryScheduledStore();
-    this.logger = opts.logger ?? createNoopLogger();
+    this.logger = opts.logger ?? createConsoleLogger();
     this.evalTimeoutMs = opts.evaluationTimeoutMs ?? 15_000;
     const requestedPoll = opts.scheduledPollMs ?? 10_000;
     this.schedPollMs = Math.max(10_000, requestedPoll);
@@ -189,14 +197,15 @@ class EngineImpl implements RuleEngine {
       try { controller.abort(new Error('evaluation timeout')); } catch { /* */ }
     }, this.evalTimeoutMs);
     let userAbortHandler: (() => void) | null = null;
-    if (opts?.signal) {
-      if (opts.signal.aborted) {
-        try { controller.abort((opts.signal as any).reason); } catch { /* */ }
+    const userSignal = opts?.signal;
+    if (userSignal) {
+      if (userSignal.aborted) {
+        try { controller.abort(userSignal.reason); } catch { /* */ }
       } else {
         userAbortHandler = () => {
-          try { controller.abort((opts.signal as any).reason); } catch { /* */ }
+          try { controller.abort(userSignal.reason); } catch { /* */ }
         };
-        opts.signal.addEventListener('abort', userAbortHandler);
+        userSignal.addEventListener('abort', userAbortHandler);
       }
     }
 
@@ -229,8 +238,8 @@ class EngineImpl implements RuleEngine {
     } finally {
       this.evalControllers.delete(controller);
       watchdog.cancel();
-      if (opts?.signal && userAbortHandler) {
-        opts.signal.removeEventListener('abort', userAbortHandler);
+      if (userSignal && userAbortHandler) {
+        userSignal.removeEventListener('abort', userAbortHandler);
       }
     }
   }
@@ -382,7 +391,7 @@ class EngineImpl implements RuleEngine {
 
   private throwIfAborted(signal: AbortSignal): void {
     if (!signal.aborted) return;
-    const reason = (signal as any).reason;
+    const reason = signal.reason;
     throw reason instanceof Error ? reason : new Error('aborted');
   }
 
@@ -390,7 +399,7 @@ class EngineImpl implements RuleEngine {
    * scheduled rule check
    * ============================================================ */
 
-  private async runScheduledCheck(rec: any): Promise<void> {
+  private async runScheduledCheck(rec: ScheduledCheck): Promise<void> {
     const registry = this.registry;
     if (!registry) return;
     const rule = registry.rules.get(rec.ruleId);
@@ -436,8 +445,10 @@ class EngineImpl implements RuleEngine {
     }
 
     if (result.kind === 'pass') {
+      // The original webhook payload was discarded when the scheduled record was stored.
+      const emptyEventPayload = {} as AnyEventPayload;
       const baseCtx = makeBaseCtx({
-        envelope: { name: rule.eventName, payload: {} as any, deliveryId: checkCtx.deliveryId },
+        envelope: { name: rule.eventName, payload: emptyEventPayload, deliveryId: checkCtx.deliveryId },
         deliveryId: checkCtx.deliveryId,
         startedAt: ranAt,
         signal: controller.signal,
@@ -478,12 +489,12 @@ class EngineImpl implements RuleEngine {
           pending.push({
             fn: async () => {
               const mergedArgs = mergeActionArgs(plain.pinnedArgs, att.args, baseCtx, plain.argsSchema);
-              const ctx = {
+              const ctx: ScheduledPlainActionCtx = {
                 ...baseCtx,
                 args: mergedArgs,
                 logger: baseCtx.logger.child({ actionName: plain.name }),
                 scheduled: scheduledView,
-              } as any;
+              };
               await plain.fn(ctx);
             },
           });

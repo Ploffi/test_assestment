@@ -32,7 +32,48 @@ import {
   not,
   use,
 } from '../_harness.js';
-import type { CheckResult } from '../../public/index.js';
+import type { DeepPartial, RuleCtx } from '../_harness.js';
+import type {
+  AnyEventPayload,
+  CheckResult,
+  PayloadFor,
+  WebhookEventName,
+} from '../../public/index.js';
+
+type PullRequestOpenedExamplePayload = DeepPartial<PayloadFor<'pull_request.opened'>> & {
+  pull_request: NonNullable<DeepPartial<PayloadFor<'pull_request.opened'>>['pull_request']> & {
+    files?: Array<{ filename: string }>;
+  };
+};
+
+type ExamplePayload<N extends WebhookEventName> = N extends 'pull_request.opened'
+  ? PullRequestOpenedExamplePayload
+  : DeepPartial<PayloadFor<N>>;
+
+type PullRequestPayloadWithFiles = PayloadFor<'pull_request.opened'> & {
+  pull_request: PayloadFor<'pull_request.opened'>['pull_request'] & {
+    files?: ReadonlyArray<{ filename: string }>;
+  };
+};
+
+function exampleEnvelope<N extends WebhookEventName>(
+  name: N,
+  payload: ExamplePayload<N>,
+) {
+  return fakeEnvelope(name, payload as unknown as DeepPartial<PayloadFor<N>>);
+}
+
+function hasPullRequestFiles(event: AnyEventPayload): event is PullRequestPayloadWithFiles {
+  return 'pull_request' in event;
+}
+
+function hasCommentBody(event: AnyEventPayload): event is PayloadFor<'issue_comment.created'> {
+  return 'comment' in event;
+}
+
+function hasRelease(event: AnyEventPayload): event is PayloadFor<'release.published'> {
+  return 'release' in event;
+}
 
 /* ============================================================ *
  * task.md line 17:
@@ -55,7 +96,7 @@ describe('task.md #1 — PR opened, main, non-core, touches infra/', () => {
       .args(z.object({ glob: z.string() }))
       .fn(async (ctx) => {
         const prefix = ctx.args.glob.replace(/\*\*$/, '');
-        const files = ((ctx.event as any).pull_request.files ?? []) as Array<{ filename: string }>;
+        const files = hasPullRequestFiles(ctx.event) ? ctx.event.pull_request.files ?? [] : [];
         return files.some((file) => file.filename.startsWith(prefix));
       });
 
@@ -67,7 +108,7 @@ describe('task.md #1 — PR opened, main, non-core, touches infra/', () => {
           not(
             use('is_team_member', {
               team: 'core',
-              login: (ctx: any) => ctx.event.pull_request.user.login,
+              login: (ctx: RuleCtx<'pull_request.opened'>) => ctx.event.pull_request.user.login,
             }),
           ),
           use('touches_paths', { glob: 'infra/**' }),
@@ -87,13 +128,13 @@ describe('task.md #1 — PR opened, main, non-core, touches infra/', () => {
   test('positive — main branch, non-core author, infra/ paths → fires', async () => {
     const { engine, recorded } = build();
     await engine.evaluate(
-      fakeEnvelope('pull_request.opened', {
+      exampleEnvelope('pull_request.opened', {
         pull_request: {
           base: { ref: 'main' },
           user: { login: 'mallory' }, // not 'alice'
           files: [{ filename: 'infra/terraform/main.tf' }],
         },
-      } as any),
+      }),
     );
     expect(recorded).toHaveBeenCalledTimes(1);
   });
@@ -101,13 +142,13 @@ describe('task.md #1 — PR opened, main, non-core, touches infra/', () => {
   test('negative — author is core-team → does NOT fire', async () => {
     const { engine, recorded } = build();
     await engine.evaluate(
-      fakeEnvelope('pull_request.opened', {
+      exampleEnvelope('pull_request.opened', {
         pull_request: {
           base: { ref: 'main' },
           user: { login: 'alice' }, // core team
           files: [{ filename: 'infra/terraform/main.tf' }],
         },
-      } as any),
+      }),
     );
     expect(recorded).not.toHaveBeenCalled();
   });
@@ -115,13 +156,13 @@ describe('task.md #1 — PR opened, main, non-core, touches infra/', () => {
   test('negative — base branch is not main → does NOT fire', async () => {
     const { engine, recorded } = build();
     await engine.evaluate(
-      fakeEnvelope('pull_request.opened', {
+      exampleEnvelope('pull_request.opened', {
         pull_request: {
           base: { ref: 'develop' },
           user: { login: 'mallory' },
           files: [{ filename: 'infra/terraform/main.tf' }],
         },
-      } as any),
+      }),
     );
     expect(recorded).not.toHaveBeenCalled();
   });
@@ -129,13 +170,13 @@ describe('task.md #1 — PR opened, main, non-core, touches infra/', () => {
   test('negative — main branch outsider but no infra/ paths → does NOT fire', async () => {
     const { engine, recorded } = build();
     await engine.evaluate(
-      fakeEnvelope('pull_request.opened', {
+      exampleEnvelope('pull_request.opened', {
         pull_request: {
           base: { ref: 'main' },
           user: { login: 'mallory' },
           files: [{ filename: 'docs/readme.md' }],
         },
-      } as any),
+      }),
     );
     expect(recorded).not.toHaveBeenCalled();
   });
@@ -180,12 +221,12 @@ describe('task.md #2 — 3 failing CI runs within 1h on same PR', () => {
     const { engine, recorded } = build();
 
     const failingForPr = (prId: number) =>
-      fakeEnvelope('workflow_run.completed', {
+      exampleEnvelope('workflow_run.completed', {
         workflow_run: {
           conclusion: 'failure',
           pull_requests: [{ id: prId }],
         },
-      } as any);
+      });
 
     await engine.evaluate(failingForPr(42));
     await engine.evaluate(failingForPr(42));
@@ -200,12 +241,12 @@ describe('task.md #2 — 3 failing CI runs within 1h on same PR', () => {
 
     for (const prId of [10, 11, 12]) {
       await engine.evaluate(
-        fakeEnvelope('workflow_run.completed', {
+        exampleEnvelope('workflow_run.completed', {
           workflow_run: {
             conclusion: 'failure',
             pull_requests: [{ id: prId }],
           },
-        } as any),
+        }),
       );
     }
     expect(recorded).not.toHaveBeenCalled();
@@ -216,12 +257,12 @@ describe('task.md #2 — 3 failing CI runs within 1h on same PR', () => {
 
     for (let i = 0; i < 5; i++) {
       await engine.evaluate(
-        fakeEnvelope('workflow_run.completed', {
+        exampleEnvelope('workflow_run.completed', {
           workflow_run: {
             conclusion: 'success',
             pull_requests: [{ id: 42 }],
           },
-        } as any),
+        }),
       );
     }
     expect(recorded).not.toHaveBeenCalled();
@@ -259,12 +300,12 @@ describe('task.md #2 — 3 failing CI runs within 1h on same PR', () => {
     engine.register({ aggregatedActions: [recordAction({})], rules: [r()] });
 
     const failingForPr = (prId: number) =>
-      fakeEnvelope('workflow_run.completed', {
+      exampleEnvelope('workflow_run.completed', {
         workflow_run: {
           conclusion: 'failure',
           pull_requests: [{ id: prId }],
         },
-      } as any);
+      });
 
     // t = 0: first failure
     await engine.evaluate(failingForPr(42));
@@ -327,7 +368,7 @@ describe('task.md #3 — issue.closed if not reopened in 5m', () => {
   test('positive — issue stayed closed for 5m → reaction fires', async () => {
     const { engine, recorded, clock } = build();
     await engine.evaluate(
-      fakeEnvelope('issues.closed', { issue: { id: 1 } } as any),
+      exampleEnvelope('issues.closed', { issue: { id: 1 } }),
     );
     // Advance past delay + one scheduler tick.
     clock.advance(5 * 60_000 + 11_000);
@@ -339,7 +380,7 @@ describe('task.md #3 — issue.closed if not reopened in 5m', () => {
   test('negative — issue was reopened in the window → reaction does NOT fire', async () => {
     const { engine, recorded, clock, reopenedIssueIds } = build();
     await engine.evaluate(
-      fakeEnvelope('issues.closed', { issue: { id: 1 } } as any),
+      exampleEnvelope('issues.closed', { issue: { id: 1 } }),
     );
     reopenedIssueIds.add(1);
     clock.advance(5 * 60_000 + 11_000);
@@ -351,7 +392,7 @@ describe('task.md #3 — issue.closed if not reopened in 5m', () => {
   test('negative — checked too early (before delay) → not yet fired', async () => {
     const { engine, recorded, clock } = build();
     await engine.evaluate(
-      fakeEnvelope('issues.closed', { issue: { id: 1 } } as any),
+      exampleEnvelope('issues.closed', { issue: { id: 1 } }),
     );
     clock.advance(60_000); // 1m — well before 5m
     await new Promise((r) => setImmediate(r));
@@ -394,10 +435,9 @@ describe('task.md #4 — PR comment flagged hostile by classifier', () => {
     const isHostileComment = predicate('is_hostile_comment')
       .args(z.object({ minConfidence: z.number() }))
       .fn(async (ctx) => {
-        // Predicates are event-variant-agnostic per ADR-016; narrow inside .fn.
-        const event = ctx.event as { comment: { body: string } };
+        if (!hasCommentBody(ctx.event)) return false;
         const r = await ctx.integrations['classifier']?.['classify']({
-          text: event.comment.body,
+          text: ctx.event.comment.body,
           signal: ctx.signal,
         });
         return r?.label === 'hostile' && r.confidence >= ctx.args.minConfidence;
@@ -407,7 +447,7 @@ describe('task.md #4 — PR comment flagged hostile by classifier', () => {
       .on('issue_comment.created')
       .when(
         all(
-          (ctx) => Boolean((ctx.event.issue as any).pull_request),
+          (ctx) => Boolean(ctx.event.issue.pull_request),
           use('is_hostile_comment', { minConfidence: 0.8 }),
         ),
       )
@@ -426,10 +466,10 @@ describe('task.md #4 — PR comment flagged hostile by classifier', () => {
   test('positive — classifier returns hostile → fires', async () => {
     const { engine, recorded } = build('hostile');
     await engine.evaluate(
-      fakeEnvelope('issue_comment.created', {
+      exampleEnvelope('issue_comment.created', {
         issue: { pull_request: { url: 'https://api.github.com/pulls/1' } },
         comment: { body: 'something nasty', user: { login: 'mallory' } },
-      } as any),
+      }),
     );
     expect(recorded).toHaveBeenCalledTimes(1);
   });
@@ -437,10 +477,10 @@ describe('task.md #4 — PR comment flagged hostile by classifier', () => {
   test('negative — classifier returns ok → does NOT fire', async () => {
     const { engine, recorded } = build('ok');
     await engine.evaluate(
-      fakeEnvelope('issue_comment.created', {
+      exampleEnvelope('issue_comment.created', {
         issue: { pull_request: { url: 'https://api.github.com/pulls/1' } },
         comment: { body: 'hello there', user: { login: 'alice' } },
-      } as any),
+      }),
     );
     expect(recorded).not.toHaveBeenCalled();
   });
@@ -448,10 +488,10 @@ describe('task.md #4 — PR comment flagged hostile by classifier', () => {
   test('negative — hostile issue comment that is not on a PR → does NOT fire', async () => {
     const { engine, recorded } = build('hostile');
     await engine.evaluate(
-      fakeEnvelope('issue_comment.created', {
+      exampleEnvelope('issue_comment.created', {
         issue: {},
         comment: { body: 'something nasty', user: { login: 'mallory' } },
-      } as any),
+      }),
     );
     expect(recorded).not.toHaveBeenCalled();
   });
@@ -477,16 +517,13 @@ describe('task.md #5 — release.published + semver tag + "breaking change"', ()
         const regex = new RegExp(
           '^' + ctx.args.pattern.replace(/\./g, '\\.').replace(/\*/g, '\\d+') + '$',
         );
-        // Predicates are event-variant-agnostic per ADR-016; narrow inside .fn.
-        const event = ctx.event as { release: { tag_name: string } };
-        return regex.test(event.release.tag_name);
+        return hasRelease(ctx.event) && regex.test(ctx.event.release.tag_name);
       });
 
     const bodyContains = predicate('body_contains')
       .args(z.object({ needle: z.string() }))
       .fn(async (ctx) => {
-        const event = ctx.event as { release: { body?: string } };
-        return (event.release.body ?? '').includes(ctx.args.needle);
+        return hasRelease(ctx.event) && (ctx.event.release.body ?? '').includes(ctx.args.needle);
       });
 
     const r = rule('breaking-release')
@@ -511,12 +548,12 @@ describe('task.md #5 — release.published + semver tag + "breaking change"', ()
   test('positive — v1.2.3 tag + "breaking change" in notes → fires', async () => {
     const { engine, recorded } = build();
     await engine.evaluate(
-      fakeEnvelope('release.published', {
+      exampleEnvelope('release.published', {
         release: {
           tag_name: 'v1.2.3',
           body: 'Adds X. Note: breaking change in API.',
         },
-      } as any),
+      }),
     );
     expect(recorded).toHaveBeenCalledTimes(1);
   });
@@ -524,12 +561,12 @@ describe('task.md #5 — release.published + semver tag + "breaking change"', ()
   test('negative — non-semver tag → does NOT fire', async () => {
     const { engine, recorded } = build();
     await engine.evaluate(
-      fakeEnvelope('release.published', {
+      exampleEnvelope('release.published', {
         release: {
           tag_name: 'rc-2024-05',
           body: 'breaking change inside',
         },
-      } as any),
+      }),
     );
     expect(recorded).not.toHaveBeenCalled();
   });
@@ -537,12 +574,12 @@ describe('task.md #5 — release.published + semver tag + "breaking change"', ()
   test('negative — semver tag but no "breaking change" mention → does NOT fire', async () => {
     const { engine, recorded } = build();
     await engine.evaluate(
-      fakeEnvelope('release.published', {
+      exampleEnvelope('release.published', {
         release: {
           tag_name: 'v2.0.1',
           body: 'Patch release. Minor fixes.',
         },
-      } as any),
+      }),
     );
     expect(recorded).not.toHaveBeenCalled();
   });
@@ -577,12 +614,12 @@ describe('DSL composition — OR (any) + grouping + negation', () => {
     engine.register({ actions: [rec({})], rules: [r()] });
 
     await engine.evaluate(
-      fakeEnvelope('issues.opened', { issue: { title: 'p0 — outage' } } as any),
+      exampleEnvelope('issues.opened', { issue: { title: 'p0 — outage' } }),
     );
     expect(recorded).toHaveBeenCalledTimes(1);
 
     await engine.evaluate(
-      fakeEnvelope('issues.opened', { issue: { title: 'normal task' } } as any),
+      exampleEnvelope('issues.opened', { issue: { title: 'normal task' } }),
     );
     expect(recorded).toHaveBeenCalledTimes(1); // unchanged
   });
@@ -611,23 +648,23 @@ describe('DSL composition — OR (any) + grouping + negation', () => {
 
     // bug AND not wontfix → fires
     await engine.evaluate(
-      fakeEnvelope('issues.opened', { issue: { title: 'bug in flow' } } as any),
+      exampleEnvelope('issues.opened', { issue: { title: 'bug in flow' } }),
     );
     expect(recorded).toHaveBeenCalledTimes(1);
 
     // regression AND wontfix → does not fire (negation kills it)
     await engine.evaluate(
-      fakeEnvelope('issues.opened', {
+      exampleEnvelope('issues.opened', {
         issue: { title: 'regression — wontfix' },
-      } as any),
+      }),
     );
     expect(recorded).toHaveBeenCalledTimes(1);
 
     // neither bug nor regression → does not fire
     await engine.evaluate(
-      fakeEnvelope('issues.opened', {
+      exampleEnvelope('issues.opened', {
         issue: { title: 'feature request' },
-      } as any),
+      }),
     );
     expect(recorded).toHaveBeenCalledTimes(1);
   });

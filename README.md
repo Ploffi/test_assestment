@@ -27,6 +27,8 @@ Run the demo with PostgreSQL and the app in Docker from the repository root:
 docker compose up --build
 ```
 
+Compose exposes the demo app on `http://localhost:3300` and PostgreSQL on `localhost:15432`.
+
 ## DSL Shape
 
 Rules are TypeScript values built with fluent builders:

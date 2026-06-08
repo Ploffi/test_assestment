@@ -1,7 +1,7 @@
 import { createApp } from './server.js';
 import { createPostgresDemoStorage } from './postgres-storage.js';
 
-const port = Number(process.env.PORT ?? 3000);
+const port = Number(process.env.PORT ?? 3300);
 const host = process.env.HOST ?? '0.0.0.0';
 const storage = process.env.DATABASE_URL
   ? createPostgresDemoStorage({ connectionString: process.env.DATABASE_URL })

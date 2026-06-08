@@ -2,6 +2,7 @@ import { createHmac } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 
+import type { DashboardSnapshot } from '../src/dashboard.js';
 import { createDemoStore, type DemoNotification } from '../src/rules.js';
 import { createApp, type DemoApp } from '../src/server.js';
 
@@ -101,6 +102,39 @@ describe('GitHub webhook demo e2e', () => {
     });
   });
 
+  test('exposes notifications, logs, and events on the dashboard data endpoint', async () => {
+    const response = await sendHook('pull_request', 'delivery-dashboard-1', {
+      action: 'opened',
+      repository: { id: 1, full_name: 'air/demo' },
+      pull_request: {
+        number: 21,
+        title: 'Infra dashboard check',
+        html_url: 'https://github.com/air/demo/pull/21',
+        base: { ref: 'main' },
+        head: { ref: 'mallory/infra-dashboard' },
+        user: { login: 'mallory' },
+      },
+    });
+
+    expect(response.status).toBe(202);
+
+    const dashboard = await dashboardData();
+    expect(dashboard.notifications).toHaveLength(1);
+    expect(dashboard.logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ message: 'POST /github/webhook 202' }),
+    ]));
+    expect(dashboard.webhookEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        deliveryId: 'delivery-dashboard-1',
+        engineEvent: 'pull_request.opened',
+        outcome: 'accepted',
+      }),
+    ]));
+    expect(dashboard.engineEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'evaluation.completed' }),
+    ]));
+  });
+
   async function sendHook(githubEvent: string, deliveryId: string, payload: unknown): Promise<Response> {
     const rawBody = JSON.stringify(payload);
     return fetch(`${baseUrl}/github/webhook`, {
@@ -119,6 +153,11 @@ describe('GitHub webhook demo e2e', () => {
     const response = await fetch(`${baseUrl}/demo/notifications`);
     const body = await response.json() as { notifications: DemoNotification[] };
     return body.notifications;
+  }
+
+  async function dashboardData(): Promise<DashboardSnapshot> {
+    const response = await fetch(`${baseUrl}/demo/dashboard/data`);
+    return await response.json() as DashboardSnapshot;
   }
 });
 

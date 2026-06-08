@@ -14,7 +14,7 @@ Or run it with Docker from the repository root:
 
 ```sh
 docker build -f demo/Dockerfile -t air-demo .
-docker run --rm -p 3000:3000 -e GITHUB_WEBHOOK_SECRET=dev-secret air-demo
+docker run --rm -p 3300:3300 -e GITHUB_WEBHOOK_SECRET=dev-secret air-demo
 ```
 
 Or run the app with PostgreSQL via Compose from the repository root:
@@ -23,7 +23,9 @@ Or run the app with PostgreSQL via Compose from the repository root:
 docker compose up --build
 ```
 
-POST GitHub webhooks to `POST /github/webhook`. The demo also exposes `GET /demo/notifications` so tests and humans can inspect action results.
+Compose exposes the app on `http://localhost:3300` and PostgreSQL on `localhost:15432`.
+
+POST GitHub webhooks to `POST /github/webhook`. The demo also exposes `GET /demo/notifications` so tests and humans can inspect action results. A primitive read-only dashboard is available at `GET /demo/dashboard`, with raw JSON at `GET /demo/dashboard/data`.
 
 ## Scope
 

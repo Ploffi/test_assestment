@@ -16,11 +16,18 @@ import {
   createDemoStore,
   type DemoStore,
 } from './rules.js';
+import {
+  createDashboardRecorder,
+  renderDashboard,
+  subscribeDashboardToEngine,
+  type DashboardRecorder,
+} from './dashboard.js';
 
 export interface DemoApp {
   app: FastifyInstance;
   engine: RuleEngine;
   store: DemoStore;
+  dashboard: DashboardRecorder;
 }
 
 export interface DemoAppOptions {
@@ -30,6 +37,7 @@ export interface DemoAppOptions {
   logger?: PinoLogger;
   aggregationStore?: AggregationStore;
   scheduledStore?: ScheduledStore;
+  dashboard?: DashboardRecorder;
 }
 
 const supportedEventNames = new Set<WebhookEventName>([
@@ -56,6 +64,7 @@ const supportedEventNames = new Set<WebhookEventName>([
 export function createApp(opts: DemoAppOptions = {}): DemoApp {
   const store = opts.store ?? createDemoStore();
   const logger = opts.logger ?? createDemoLogger();
+  const dashboard = opts.dashboard ?? createDashboardRecorder();
   const engine = opts.engine ?? createDemoEngine(
     store,
     asEngineLogger(logger.child({ component: 'engine' })),
@@ -64,6 +73,7 @@ export function createApp(opts: DemoAppOptions = {}): DemoApp {
       scheduledStore: opts.scheduledStore,
     },
   );
+  subscribeDashboardToEngine(engine, dashboard);
   const app = Fastify({
     loggerInstance: logger.child({ component: 'http' }) as unknown as FastifyBaseLogger,
   });
@@ -77,6 +87,42 @@ export function createApp(opts: DemoAppOptions = {}): DemoApp {
 
   app.get('/demo/notifications', async () => ({ notifications: await store.list() }));
 
+  app.get('/demo/dashboard/data', async () => ({
+    notifications: await store.list(),
+    logs: dashboard.logs(),
+    webhookEvents: dashboard.webhookEvents(),
+    engineEvents: dashboard.engineEvents(),
+  }));
+
+  app.get('/demo/dashboard', async (_request, reply) => {
+    return reply.type('text/html').send(renderDashboard({
+      notifications: await store.list(),
+      logs: dashboard.logs(),
+      webhookEvents: dashboard.webhookEvents(),
+      engineEvents: dashboard.engineEvents(),
+    }));
+  });
+
+  app.addHook('onResponse', async (request, reply) => {
+    dashboard.recordLog({
+      level: reply.statusCode >= 500 ? 'error' : reply.statusCode >= 400 ? 'warn' : 'info',
+      message: `${request.method} ${request.url} ${reply.statusCode}`,
+      details: {
+        method: request.method,
+        url: request.url,
+        statusCode: reply.statusCode,
+      },
+    });
+  });
+
+  app.addHook('onError', async (request, _reply, err) => {
+    dashboard.recordLog({
+      level: 'error',
+      message: `${request.method} ${request.url} failed`,
+      details: { name: err.name, message: err.message, stack: err.stack },
+    });
+  });
+
   app.post('/github/webhook', async (request, reply) => {
     const rawBody = typeof request.body === 'string' ? request.body : '';
     const githubEvent = firstHeader(request.headers['x-github-event']);
@@ -84,20 +130,49 @@ export function createApp(opts: DemoAppOptions = {}): DemoApp {
     const signature = firstHeader(request.headers['x-hub-signature-256']);
 
     if (!githubEvent || !deliveryId) {
+      dashboard.recordWebhookEvent({
+        deliveryId,
+        githubEvent,
+        outcome: 'rejected',
+        statusCode: 400,
+        reason: 'missing GitHub webhook headers',
+      });
       return reply.code(400).send({ ok: false, error: 'missing GitHub webhook headers' });
     }
 
     if (!verifySignature(rawBody, signature, opts.webhookSecret)) {
+      dashboard.recordWebhookEvent({
+        deliveryId,
+        githubEvent,
+        outcome: 'rejected',
+        statusCode: 401,
+        reason: 'invalid signature',
+      });
       return reply.code(401).send({ ok: false, error: 'invalid signature' });
     }
 
     const payload = parseJson(rawBody);
     if (payload === undefined) {
+      dashboard.recordWebhookEvent({
+        deliveryId,
+        githubEvent,
+        outcome: 'rejected',
+        statusCode: 400,
+        reason: 'invalid JSON payload',
+      });
       return reply.code(400).send({ ok: false, error: 'invalid JSON payload' });
     }
 
     const name = toEngineEventName(githubEvent, payload);
     if (!name) {
+      dashboard.recordWebhookEvent({
+        deliveryId,
+        githubEvent,
+        outcome: 'ignored',
+        statusCode: 202,
+        reason: 'unsupported event',
+        payload,
+      });
       return reply.code(202).send({
         ok: true,
         ignored: true,
@@ -119,13 +194,30 @@ export function createApp(opts: DemoAppOptions = {}): DemoApp {
       // around asynchronous evaluation and downstream actions.
       await engine.evaluate(envelope);
     } catch {
+      dashboard.recordWebhookEvent({
+        deliveryId,
+        githubEvent,
+        engineEvent: name,
+        outcome: 'failed',
+        statusCode: 500,
+        reason: 'evaluation failed',
+        payload,
+      });
       return reply.code(500).send({ ok: false, error: 'evaluation failed', deliveryId });
     }
 
+    dashboard.recordWebhookEvent({
+      deliveryId,
+      githubEvent,
+      engineEvent: name,
+      outcome: 'accepted',
+      statusCode: 202,
+      payload,
+    });
     return reply.code(202).send({ ok: true, ignored: false, deliveryId, event: name });
   });
 
-  return { app, engine, store };
+  return { app, engine, store, dashboard };
 }
 
 function firstHeader(value: string | string[] | undefined): string | undefined {

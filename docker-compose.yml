@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: air
       POSTGRES_PASSWORD: air
     ports:
-      - "5432:5432"
+      - "15432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -21,11 +21,11 @@ services:
       dockerfile: demo/Dockerfile
     environment:
       HOST: 0.0.0.0
-      PORT: 3000
+      PORT: 3300
       GITHUB_WEBHOOK_SECRET: dev-secret
       DATABASE_URL: postgres://air:air@postgres:5432/air_demo
     ports:
-      - "3000:3000"
+      - "3300:3300"
     depends_on:
       postgres:
         condition: service_healthy

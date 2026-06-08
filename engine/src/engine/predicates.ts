@@ -11,7 +11,7 @@ import type {
   WhenNode,
 } from '../public/index.js';
 import type { PredicateEvaluatedEvent } from '../public/emitter.js';
-import { canonicalJson } from './canonical.js';
+import { canonicalJson } from './utility/canonical.js';
 
 export interface EvaluateWhenOptions {
   node: WhenNode<any, any>;

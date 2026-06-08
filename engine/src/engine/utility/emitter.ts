@@ -1,7 +1,7 @@
 import type {
   EngineEventName,
   EngineEventPayload,
-} from '../public/emitter.js';
+} from '../../public/emitter.js';
 
 export type EngineEmit = <N extends EngineEventName>(
   eventName: N,

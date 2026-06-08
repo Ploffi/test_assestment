@@ -1,4 +1,4 @@
-import type { Duration } from '../public/rule.js';
+import type { Duration } from '../../public/rule.js';
 
 export function parseDuration(d: Duration): number {
   if (typeof d === 'number') return d;

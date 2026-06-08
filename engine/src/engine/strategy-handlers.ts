@@ -10,14 +10,14 @@ import type {
   ScheduledStore,
   WebhookEventName,
 } from '../public/index.js';
-import type { EngineEmit } from './emitter.js';
-import { parseDuration } from './duration.js';
+import type { EngineEmit } from './utility/emitter.js';
+import { parseDuration } from './utility/duration.js';
 import {
   type PendingAction,
   queueAggregatedAction,
   queuePlainAction,
 } from './actions.js';
-import { throwIfAborted } from './cancellation.js';
+import { throwIfAborted } from './utility/cancellation.js';
 
 export interface StrategyHandlerOptions {
   rule: RegisteredRule<string, WebhookEventName, any>;

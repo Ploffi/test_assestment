@@ -5,8 +5,8 @@ import type {
 } from '../public/integration.js';
 import type { Clock } from '../public/clock.js';
 import type { ExternalCallEvent } from '../public/emitter.js';
-import { canonicalJson } from './canonical.js';
-import { parseDuration } from './duration.js';
+import { canonicalJson } from './utility/canonical.js';
+import { parseDuration } from './utility/duration.js';
 
 export const integrationCallContext: unique symbol = Symbol('integrationCallContext');
 

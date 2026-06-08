@@ -1,4 +1,4 @@
-import type { Clock, Timer } from '../public/index.js';
+import type { Clock, Timer } from '../../public/index.js';
 
 export interface CancellationScopeOptions {
   clock: Clock;

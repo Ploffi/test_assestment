@@ -7,11 +7,11 @@ import type {
   Logger,
   ScheduledStore,
 } from '../public/index.js';
-import type { EngineEmit } from './emitter.js';
+import type { EngineEmit } from './utility/emitter.js';
 import type { PendingAction } from './actions.js';
 import { runPendingActions } from './action-executor.js';
-import { throwIfAborted } from './cancellation.js';
-import { makeRuleBaseCtx } from './context-factories.js';
+import { throwIfAborted } from './utility/cancellation.js';
+import { makeRuleBaseCtx } from './utility/context-factories.js';
 import { evaluateWhen } from './predicates.js';
 import { handleRuleStrategy } from './strategy-handlers.js';
 

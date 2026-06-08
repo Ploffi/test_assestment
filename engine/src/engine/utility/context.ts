@@ -1,4 +1,4 @@
-import type { Registry } from '../internal/registry.js';
+import type { Registry } from '../../internal/registry.js';
 import type {
   AnyEventPayload,
   BaseCtx,
@@ -6,8 +6,8 @@ import type {
   IntegrationAdapter,
   IntegrationMethods,
   Logger,
-} from '../public/index.js';
-import { attachIntegrationCallContext } from './adapter.js';
+} from '../../public/index.js';
+import { attachIntegrationCallContext } from '../adapter.js';
 
 export function bindIntegrations(
   registry: Registry,

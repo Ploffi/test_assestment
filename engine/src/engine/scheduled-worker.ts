@@ -12,19 +12,19 @@ import type {
   Timer,
 } from '../public/index.js';
 import type { ScheduledOutcome } from '../public/emitter.js';
-import type { EngineEmit } from './emitter.js';
+import type { EngineEmit } from './utility/emitter.js';
 import type { PendingAction } from './actions.js';
 import { mergeActionArgs } from './actions.js';
 import { runPendingActions } from './action-executor.js';
-import { CancellationScope } from './cancellation.js';
+import { CancellationScope } from './utility/cancellation.js';
 import {
   type ScheduledPlainActionCtx,
   makeScheduledBaseCtx,
   makeScheduledCheckCtx,
   makeScheduledView,
   scheduledDeliveryId,
-} from './context-factories.js';
-import { parseDuration } from './duration.js';
+} from './utility/context-factories.js';
+import { parseDuration } from './utility/duration.js';
 
 export interface ScheduledWorkerOptions {
   clock: Clock;

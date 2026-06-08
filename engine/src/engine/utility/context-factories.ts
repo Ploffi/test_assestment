@@ -1,4 +1,4 @@
-import type { Registry } from '../internal/registry.js';
+import type { Registry } from '../../internal/registry.js';
 import type {
   AnyEventPayload,
   BaseCtx,
@@ -8,7 +8,7 @@ import type {
   ScheduledCheck,
   ScheduledView,
   WebhookEventName,
-} from '../public/index.js';
+} from '../../public/index.js';
 import { bindIntegrations, makeBaseCtx } from './context.js';
 
 export type ScheduledPlainActionCtx = BaseCtx<AnyEventPayload, unknown> & {

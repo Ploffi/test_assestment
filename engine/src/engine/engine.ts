@@ -23,8 +23,8 @@ import { SystemClock } from '../utility/clock.js';
 import { createInMemoryAggregationStore } from '../utility/aggregation-store.js';
 import { createInMemoryScheduledStore } from '../utility/scheduled-store.js';
 import { buildRegistry } from './registration.js';
-import { EngineEmitter } from './emitter.js';
-import { CancellationScope } from './cancellation.js';
+import { EngineEmitter } from './utility/emitter.js';
+import { CancellationScope } from './utility/cancellation.js';
 import { EventEvaluationRunner } from './evaluation-runner.js';
 import { ScheduledWorker } from './scheduled-worker.js';
 

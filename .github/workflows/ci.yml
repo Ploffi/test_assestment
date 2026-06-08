@@ -116,7 +116,7 @@ jobs:
         run: npm run test:live-github --prefix demo
         env:
           DATABASE_URL: postgres://air:air@localhost:5432/air_demo
-          LIVE_GITHUB_API_URL: ${{ vars.LIVE_GITHUB_API_URL }}
+          LIVE_GITHUB_API_URL: https://api.github.com
           LIVE_GITHUB_ORG: PloffiTestOrg
           LIVE_GITHUB_REPOSITORY_VISIBILITY: public
           LIVE_GITHUB_TOKEN: ${{ secrets.LIVE_GITHUB_TOKEN }}

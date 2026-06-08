@@ -13,14 +13,24 @@ A prototype rule engine that filters GitHub webhook events through code-as-confi
   - `src/utility/` — runtime implementations of public shapes that are **not** engine-coupled: `SystemClock`, no-op logger, combinator factories (`all` / `any` / `not` / `use`), in-memory `AggregationStore` / `ScheduledStore`.
   - `src/engine/` — the engine itself: builder factories (`predicate` / `action` / `aggregatedAction` / `scheduledAction` / `rule` / `integration`), `createEngine`, and the integration adapter.
   - `src/__tests__/` — vitest suites: `utility/`, `smoke/`, `integration/`, `acceptance`. Plus `_harness.ts` (test import seam), `_helpers.ts` (test-only implementations such as `createManualClock` / `fakeEnvelope`), and `_fixtures.ts` (shared rule/predicate/action fixtures).
+- `demo/` — Fastify webhook ingress package (`@air/demo`) that accepts GitHub webhooks and evaluates them with `@air/engine`.
+  - `src/server.ts` — Fastify app factory, webhook signature verification, event-name mapping, and `/demo/notifications` endpoint.
+  - `src/index.ts` — runtime entrypoint. Uses in-memory stores by default; when `DATABASE_URL` is set, initializes PostgreSQL storage and closes it on shutdown.
+  - `src/rules.ts` — demo rule/action definitions plus the in-memory `DemoStore`.
+  - `src/postgres-storage.ts` — PostgreSQL-backed demo notification store plus engine `AggregationStore` and `ScheduledStore` implementations.
+  - `test/` — demo E2E tests that start the HTTP server and send signed webhook requests.
+- `docker-compose.yml` — runs PostgreSQL and the demo app together for local end-to-end use.
 - `task.md` — the original assignment.
 
 ## Workflow
 
 - `npm test` (from `engine/`) — runs `tsc --noEmit` then the full vitest suite. This is the gate.
 - `npm run build` (from `engine/`) — emits the package to `engine/dist/`; `dist/` is ignored.
-- `npm run typecheck` — TypeScript only.
-- `npm run test:utility` / `npm run test:all` — narrower runs.
+- `npm run typecheck` (from `engine/`) — TypeScript only.
+- `npm run test:utility` / `npm run test:all` (from `engine/`) — narrower runs.
+- `npm test` (from `demo/`) — builds the engine, typechecks the demo, and runs demo Vitest E2E tests.
+- `npm run dev` (from `demo/`) — builds the engine and runs the demo via `tsx src/index.ts` with in-memory storage unless `DATABASE_URL` is set.
+- `docker compose up --build` (from repo root) — runs PostgreSQL and the demo app in Docker. Compose sets `DATABASE_URL=postgres://air:air@postgres:5432/air_demo`.
 
 ## Conventions
 

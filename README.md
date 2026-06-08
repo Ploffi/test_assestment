@@ -21,6 +21,12 @@ npm test
 GITHUB_WEBHOOK_SECRET=dev-secret npm run dev
 ```
 
+Run the demo with PostgreSQL and the app in Docker from the repository root:
+
+```sh
+docker compose up --build
+```
+
 ## DSL Shape
 
 Rules are TypeScript values built with fluent builders:

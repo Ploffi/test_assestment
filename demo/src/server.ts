@@ -1,8 +1,16 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import Fastify from 'fastify';
-import type { FastifyInstance } from 'fastify';
-import type { EventEnvelope, RuleEngine, WebhookEventName } from '@air/engine';
+import type { FastifyBaseLogger, FastifyInstance } from 'fastify';
+import type {
+  AggregationStore,
+  EventEnvelope,
+  RuleEngine,
+  ScheduledStore,
+  WebhookEventName,
+} from '@air/engine';
+import type { Logger as PinoLogger } from 'pino';
 
+import { asEngineLogger, createDemoLogger } from './logger.js';
 import {
   createDemoEngine,
   createDemoStore,
@@ -19,6 +27,9 @@ export interface DemoAppOptions {
   webhookSecret?: string;
   store?: DemoStore;
   engine?: RuleEngine;
+  logger?: PinoLogger;
+  aggregationStore?: AggregationStore;
+  scheduledStore?: ScheduledStore;
 }
 
 const supportedEventNames = new Set<WebhookEventName>([
@@ -44,8 +55,18 @@ const supportedEventNames = new Set<WebhookEventName>([
 
 export function createApp(opts: DemoAppOptions = {}): DemoApp {
   const store = opts.store ?? createDemoStore();
-  const engine = opts.engine ?? createDemoEngine(store);
-  const app = Fastify({ logger: false });
+  const logger = opts.logger ?? createDemoLogger();
+  const engine = opts.engine ?? createDemoEngine(
+    store,
+    asEngineLogger(logger.child({ component: 'engine' })),
+    {
+      aggregationStore: opts.aggregationStore,
+      scheduledStore: opts.scheduledStore,
+    },
+  );
+  const app = Fastify({
+    loggerInstance: logger.child({ component: 'http' }) as unknown as FastifyBaseLogger,
+  });
 
   app.removeContentTypeParser('application/json');
   app.addContentTypeParser('application/json', { parseAs: 'string' }, (_request, body, done) => {
@@ -54,7 +75,7 @@ export function createApp(opts: DemoAppOptions = {}): DemoApp {
 
   app.get('/health', async () => ({ ok: true }));
 
-  app.get('/demo/notifications', async () => ({ notifications: store.list() }));
+  app.get('/demo/notifications', async () => ({ notifications: await store.list() }));
 
   app.post('/github/webhook', async (request, reply) => {
     const rawBody = typeof request.body === 'string' ? request.body : '';

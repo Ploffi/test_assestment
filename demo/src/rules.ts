@@ -8,12 +8,16 @@ import {
   rule,
 } from '@air/engine';
 import type {
+  AggregationStore,
   AnyEventPayload,
   BaseCtx,
   Logger,
   RuleEngine,
+  ScheduledStore,
 } from '@air/engine';
 import { z } from 'zod';
+
+import { asEngineLogger, createDemoLogger } from './logger.js';
 
 export interface DemoNotification {
   id: number;
@@ -29,9 +33,14 @@ export interface DemoNotification {
 
 export interface DemoStore {
   readonly coreTeam: Set<string>;
-  add(input: Omit<DemoNotification, 'id' | 'createdAt'>): DemoNotification;
-  list(): DemoNotification[];
-  clear(): void;
+  add(input: Omit<DemoNotification, 'id' | 'createdAt'>): DemoNotification | Promise<DemoNotification>;
+  list(): DemoNotification[] | Promise<DemoNotification[]>;
+  clear(): void | Promise<void>;
+}
+
+export interface DemoEngineStoreOptions {
+  aggregationStore?: AggregationStore;
+  scheduledStore?: ScheduledStore;
 }
 
 export function createDemoStore(opts: { coreTeam?: Iterable<string> } = {}): DemoStore {
@@ -59,16 +68,18 @@ export function createDemoStore(opts: { coreTeam?: Iterable<string> } = {}): Dem
   };
 }
 
-export function createDemoEngine(store: DemoStore = createDemoStore()): RuleEngine {
+export function createDemoEngine(
+  store: DemoStore = createDemoStore(),
+  logger: Logger = asEngineLogger(createDemoLogger().child({ component: 'engine' })),
+  opts: DemoEngineStoreOptions = {},
+): RuleEngine {
   const recordInfraPr = action('record_infra_pr')
     .args(z.object({}))
     .fn(async (ctx) => {
       if (!('pull_request' in ctx.event)) return;
       const pr = ctx.event.pull_request;
 
-      // Demo storage is intentionally in-memory. A real service would write to
-      // durable storage or an outbox with idempotency keyed by deliveryId.
-      store.add({
+      await store.add({
         deliveryId: ctx.deliveryId,
         eventName: 'pull_request.opened',
         ruleId: 'infra-pr-from-outsider',
@@ -83,7 +94,7 @@ export function createDemoEngine(store: DemoStore = createDemoStore()): RuleEngi
     .fn(async (ctx) => {
       if (!('comment' in ctx.event) || !('issue' in ctx.event)) return;
 
-      store.add({
+      await store.add({
         deliveryId: ctx.deliveryId,
         eventName: 'issue_comment.created',
         ruleId: 'demo-comment-command',
@@ -104,7 +115,7 @@ export function createDemoEngine(store: DemoStore = createDemoStore()): RuleEngi
     .fn(async (ctx) => {
       const firstPr = ctx.event.workflow_run.pull_requests[0];
 
-      store.add({
+      await store.add({
         deliveryId: ctx.deliveryId,
         eventName: 'workflow_run.completed',
         ruleId: 'flaky-ci-on-pr',
@@ -151,9 +162,9 @@ export function createDemoEngine(store: DemoStore = createDemoStore()): RuleEngi
     .action('record_flaky_ci');
 
   const engine = createEngine({
-    aggregationStore: createInMemoryAggregationStore(),
-    scheduledStore: createInMemoryScheduledStore(),
-    logger: createSilentLogger(),
+    aggregationStore: opts.aggregationStore ?? createInMemoryAggregationStore(),
+    scheduledStore: opts.scheduledStore ?? createInMemoryScheduledStore(),
+    logger,
   });
 
   engine.register({
@@ -167,16 +178,4 @@ export function createDemoEngine(store: DemoStore = createDemoStore()): RuleEngi
 
 function repoName(ctx: BaseCtx<AnyEventPayload, unknown>): string | undefined {
   return ctx.repo?.fullName;
-}
-
-function createSilentLogger(): Logger {
-  return {
-    debug() {},
-    info() {},
-    warn() {},
-    error() {},
-    child() {
-      return createSilentLogger();
-    },
-  };
 }

@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -65,3 +66,52 @@ jobs:
 
       - name: Test
         run: npm test --prefix demo
+
+  live-github-e2e:
+    name: Live GitHub E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: air_demo
+          POSTGRES_USER: air
+          POSTGRES_PASSWORD: air
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U air -d air_demo"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          cache: npm
+          cache-dependency-path: |
+            engine/package-lock.json
+            demo/package-lock.json
+
+      - name: Install engine dependencies
+        run: npm ci --prefix engine
+
+      - name: Install demo dependencies
+        run: npm ci --prefix demo
+
+      - name: Run live GitHub E2E
+        run: npm run test:live-github --prefix demo
+        env:
+          DATABASE_URL: postgres://air:air@localhost:5432/air_demo
+          LIVE_GITHUB_API_URL: ${{ vars.LIVE_GITHUB_API_URL }}
+          LIVE_GITHUB_ORG: PloffiTestOrg
+          LIVE_GITHUB_REPOSITORY_VISIBILITY: public
+          LIVE_GITHUB_TOKEN: ${{ secrets.LIVE_GITHUB_TOKEN }}
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}

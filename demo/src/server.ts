@@ -3,6 +3,7 @@ import Fastify from 'fastify';
 import type { FastifyBaseLogger, FastifyInstance } from 'fastify';
 import type {
   AggregationStore,
+  Duration,
   EventEnvelope,
   RuleEngine,
   ScheduledStore,
@@ -38,6 +39,12 @@ export interface DemoAppOptions {
   aggregationStore?: AggregationStore;
   scheduledStore?: ScheduledStore;
   dashboard?: DashboardRecorder;
+  githubApiUrl?: string;
+  githubToken?: string;
+  classifierUrl?: string;
+  flakyCiWindow?: Duration;
+  issueClosedQuietDelay?: Duration;
+  issueClosedQuietDeadline?: Duration;
 }
 
 const supportedEventNames = new Set<WebhookEventName>([
@@ -71,6 +78,12 @@ export function createApp(opts: DemoAppOptions = {}): DemoApp {
     {
       aggregationStore: opts.aggregationStore,
       scheduledStore: opts.scheduledStore,
+      githubApiUrl: opts.githubApiUrl,
+      githubToken: opts.githubToken,
+      classifierUrl: opts.classifierUrl,
+      flakyCiWindow: opts.flakyCiWindow,
+      issueClosedQuietDelay: opts.issueClosedQuietDelay,
+      issueClosedQuietDeadline: opts.issueClosedQuietDeadline,
     },
   );
   subscribeDashboardToEngine(engine, dashboard);

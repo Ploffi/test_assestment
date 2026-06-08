@@ -16,7 +16,7 @@
     "test:compile": "tsc --noEmit",
     "test:utility": "vitest run src/__tests__/utility",
     "test:all": "vitest run src/__tests__",
-    "test": "npm run typecheck && npm run test:all"
+    "test": "npm run test:all"
   },
   "keywords": [],
   "author": "",

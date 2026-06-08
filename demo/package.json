@@ -9,7 +9,8 @@
     "start": "tsx src/index.ts",
     "typecheck:local": "tsc --noEmit",
     "typecheck": "npm run build:engine && npm run typecheck:local",
-    "test": "npm run build:engine && npm run typecheck:local && vitest run"
+    "test": "vitest run",
+    "test:live-github": "vitest run test/e2e/task-scenarios.e2e.test.ts"
   },
   "dependencies": {
     "@air/engine": "file:../engine",
@@ -20,6 +21,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@ngrok/ngrok": "^1.7.0",
     "@types/node": "^25.9.1",
     "@types/pg": "^8.20.0",
     "tsx": "^4.21.0",

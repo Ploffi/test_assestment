@@ -20,7 +20,10 @@ pnpm-debug.log*
 # Local environment
 .env
 .env.*
+demo/.env
+demo/.env.*
 !.env.example
+!demo/.env.example
 
 # OS and editor noise
 .DS_Store

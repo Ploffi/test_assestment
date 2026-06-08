@@ -125,6 +125,27 @@ docker compose up --build
 
 Compose exposes the demo app on `http://localhost:3300` and PostgreSQL on `localhost:15432`.
 
+## Live GitHub E2E
+
+The demo has an opt-in live E2E suite that creates a temporary GitHub repository, opens an ngrok tunnel to the local demo server, installs a webhook, performs the task.md scenarios against real GitHub APIs, verifies demo notifications, and deletes the temporary repository during cleanup.
+
+Create `demo/.env` with:
+
+```sh
+LIVE_GITHUB_TOKEN=...
+NGROK_AUTHTOKEN=...
+LIVE_GITHUB_ORG=PloffiTestOrg
+LIVE_GITHUB_REPOSITORY_VISIBILITY=private
+```
+
+Then run from the repository root:
+
+```sh
+./demo/run-live-github-e2e.sh
+```
+
+The live suite covers the explicitly mentioned task scenarios: infra PR, 3 failing CI runs, issue closed without reopen, hostile PR comment, and breaking-change release. See [`demo/README.md`](demo/README.md) for required GitHub token permissions and ngrok token setup.
+
 ## Review Guide
 
 - For the assignment requirements, read [`task.md`](task.md).

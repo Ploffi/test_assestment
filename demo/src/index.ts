@@ -18,7 +18,15 @@ const { app, engine } = createApp({
         scheduledStore: storage.scheduledStore,
       }
     : {}),
+  githubApiUrl: process.env.GITHUB_API_URL,
+  githubToken: process.env.GITHUB_TOKEN,
+  classifierUrl: process.env.DEMO_CLASSIFIER_URL,
+  flakyCiWindow: process.env.DEMO_FLAKY_CI_WINDOW,
+  issueClosedQuietDelay: process.env.DEMO_ISSUE_CLOSED_QUIET_DELAY,
+  issueClosedQuietDeadline: process.env.DEMO_ISSUE_CLOSED_QUIET_DEADLINE,
 });
+
+engine.start();
 
 app.addHook('onClose', async () => {
   await engine.stop();

@@ -58,11 +58,14 @@ jobs:
       - name: Install engine dependencies
         run: npm ci --prefix engine
 
+      - name: Build engine package
+        run: npm run build --prefix engine
+
       - name: Install demo dependencies
         run: npm ci --prefix demo
 
-      - name: Build
-        run: npm run typecheck --prefix demo
+      - name: Typecheck demo
+        run: npm run typecheck:local --prefix demo
 
       - name: Test
         run: npm test --prefix demo
@@ -102,6 +105,9 @@ jobs:
 
       - name: Install engine dependencies
         run: npm ci --prefix engine
+
+      - name: Build engine package
+        run: npm run build --prefix engine
 
       - name: Install demo dependencies
         run: npm ci --prefix demo

@@ -22,6 +22,14 @@ export DATABASE_URL="${DATABASE_URL:-postgres://air:air@localhost:15432/air_demo
 export LIVE_GITHUB_ORG="${LIVE_GITHUB_ORG:-PloffiTestOrg}"
 export LIVE_GITHUB_REPOSITORY_VISIBILITY="${LIVE_GITHUB_REPOSITORY_VISIBILITY:-private}"
 
+if [[ ! -d "${REPO_ROOT}/engine/node_modules" ]]; then
+  echo "[live-e2e] Engine dependencies are missing; installing with npm ci"
+  npm --prefix "${REPO_ROOT}/engine" ci
+fi
+
+echo "[live-e2e] Building @air/engine runtime package"
+npm --prefix "${REPO_ROOT}/engine" run build
+
 if [[ ! -d "${SCRIPT_DIR}/node_modules/@ngrok/ngrok" ]]; then
   echo "[live-e2e] @ngrok/ngrok is missing; installing demo dependencies with npm ci"
   npm --prefix "${SCRIPT_DIR}" ci

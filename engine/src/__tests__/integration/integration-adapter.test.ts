@@ -296,6 +296,43 @@ describe('integration adapter — shared resilience layers', () => {
     await evaluation;
   });
 
+  test('aborted semaphore waiters are removed and do not start after a slot opens', async () => {
+    const clock = createManualClock(0);
+    const releases: Array<() => void> = [];
+    const started: string[] = [];
+    const probe = integration('probe')
+      .concurrency(1)
+      .methods({
+        go: async (i: { name: string; signal?: AbortSignal }) => {
+          started.push(i.name);
+          await new Promise<void>((resolve) => releases.push(resolve));
+        },
+      });
+    const makeAction = (name: string) =>
+      action(name)
+        .args(z.object({}))
+        .fn(async (ctx) => {
+          await ctx.integrations['probe']?.['go']({ name, signal: ctx.signal });
+        });
+    const a = makeAction('a');
+    const b = makeAction('b');
+    const r = rule('r').on('push').when(() => true).action('a').action('b');
+    const engine = createEngine({ clock, evaluationTimeoutMs: 10 });
+    engine.register({ integrations: [probe], actions: [a({}), b({})], rules: [r()] });
+
+    const evaluation = engine.evaluate(fakeEnvelope('push'));
+    await new Promise((r) => setImmediate(r));
+    expect(started).toEqual(['a']);
+
+    clock.advance(10);
+    await expect(evaluation).rejects.toThrow(/evaluation timeout|aborted/);
+
+    releases.shift()?.();
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    expect(started).toEqual(['a']);
+  });
+
   test('external.call emits runtime metrics with delivery id and cache hit state', async () => {
     const events: Array<{ deliveryId: string; cacheHit: boolean; ok: boolean }> = [];
     const probe = integration('probe')

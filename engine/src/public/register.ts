@@ -15,6 +15,7 @@ export type IssueCode =
   | 'missing-aggregated-action'
   | 'missing-scheduled-action'
   | 'aggregate-and-schedule'
+  | 'when-depth-exceeded'
   | 'duplicate-name'
   // schema (pass 2)
   | 'invalid-args';

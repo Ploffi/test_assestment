@@ -89,7 +89,7 @@ describe('engine.on — payload narrowing', () => {
   test('scheduled.checked payload carries outcome union', () => {
     const engine = createEngine();
     engine.on('scheduled.checked', (e: ScheduledCheckedEvent) => {
-      const _outcome: 'pass' | 'skip' | 'recheck' | 'deadline_exceeded' =
+      const _outcome: 'pass' | 'skip' | 'recheck' | 'deadline_exceeded' | 'max_attempts_exceeded' =
         e.outcome;
       void _outcome;
     });

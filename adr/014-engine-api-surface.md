@@ -89,6 +89,8 @@ All options are optional. The defaults add up to a runnable engine: pass rules a
 
 - Predicate errors. These follow [ADR-004](004-evaluation-model.md)'s protection contract: the leaf returns `false`, the error is logged with `deliveryId` and `predicateName`, evaluation continues. A misbehaving predicate cannot reject `evaluate()`.
 
+Timeouts are **cooperative cancellation**, not preemptive execution stops. When the per-evaluation watchdog fires, `evaluate()` rejects and the engine aborts the shared `ctx.signal`; well-behaved predicates, actions, and integration methods should pass that signal into their async work and stop promptly. If user code ignores `ctx.signal`, its underlying promise may continue after `evaluate()` has rejected. The engine drops late predicate results and does not intentionally launch later phases after cancellation, but it cannot forcibly kill an already-running JavaScript promise; such code may retain memory or produce late side effects until it settles.
+
 Rationale: the caller (a webhook receiver) only has two questions to ask after a delivery — "did my downstream effects run?" and "do I need to retry?". A void/throw split answers both. Predicate failures are observability concerns ([ADR-011](011-observability.md)) and a rule that depends on a flaky predicate naturally evaluates to `false`; surfacing those as caller-visible rejections would force the caller to retry events that *correctly* did not match.
 
 ### Action execution

@@ -66,6 +66,24 @@ function trackingStore(): ScheduledStore & {
   };
 }
 
+async function flushScheduler(): Promise<void> {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
+async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then(() => true, () => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 describe('scheduled — enqueue on evaluate()', () => {
   test('first evaluate() enqueues and resolves void without firing actions', async () => {
     const store = trackingStore();
@@ -183,6 +201,44 @@ describe('scheduled — check outcomes', () => {
 
     expect(failed).toHaveBeenCalledTimes(1);
     expect(store.calls.removed.length).toBe(0);
+
+    await engine.stop();
+  });
+
+  test('scheduled action failures remove the record after 10 attempts', async () => {
+    const store = trackingStore();
+    const clock = createManualClock(0);
+    const outcomes: string[] = [];
+    const failed = vi.fn(async () => {
+      throw new Error('scheduled action failed');
+    });
+    const act = scheduledAction('sched-act').args(z.object({})).fn(failed);
+
+    const r = rule('r')
+      .on('issues.closed')
+      .when(() => true)
+      .schedule({
+        delay: 0,
+        key: () => 'k',
+        transform: () => ({ id: 1 }),
+        check: async () => ({ kind: 'pass' }),
+      })
+      .action('sched-act');
+
+    const engine = createEngine({ scheduledStore: store, clock });
+    engine.on('scheduled.checked', (event) => outcomes.push(event.outcome));
+    engine.register({ scheduledActions: [act({})], rules: [r()] });
+    engine.start();
+
+    await engine.evaluate(fakeEnvelope('issues.closed'));
+    for (let i = 0; i < 10; i++) {
+      clock.advance(i === 0 ? 10_000 : 30_000);
+      await flushScheduler();
+    }
+
+    expect(failed).toHaveBeenCalledTimes(10);
+    expect(store.calls.removed).toEqual([{ ruleId: 'r', keyId: 'k' }]);
+    expect(outcomes).toEqual(['max_attempts_exceeded']);
 
     await engine.stop();
   });
@@ -351,6 +407,131 @@ describe('scheduled — check outcomes', () => {
     expect(store.calls.rescheduled.length).toBe(0);
     expect(store.calls.removed.length).toBe(1);
     await engine.stop();
+  });
+});
+
+describe('scheduled — graceful shutdown', () => {
+  test('stop() aborts an in-flight scheduled check and resolves', async () => {
+    const store = trackingStore();
+    const clock = createManualClock(0);
+    const checkStarted = vi.fn();
+    const checkAborted = vi.fn();
+
+    const r = rule('r')
+      .on('issues.closed')
+      .when(() => true)
+      .schedule({
+        delay: 0,
+        key: () => 'k',
+        transform: () => ({}),
+        check: async (ctx): Promise<CheckResult> => {
+          checkStarted();
+          return new Promise<CheckResult>((_resolve, reject) => {
+            ctx.signal.addEventListener('abort', () => {
+              checkAborted();
+              reject(new Error('aborted'));
+            }, { once: true });
+          });
+        },
+      })
+      .action('sched-act');
+    const act = scheduledAction('sched-act').args(z.object({})).fn(async () => {});
+    const engine = createEngine({ scheduledStore: store, clock, evaluationTimeoutMs: 60_000 });
+    engine.register({ scheduledActions: [act({})], rules: [r()] });
+    engine.start();
+
+    await engine.evaluate(fakeEnvelope('issues.closed'));
+    clock.advance(10_000);
+    await flushScheduler();
+    expect(checkStarted).toHaveBeenCalledTimes(1);
+
+    const stopped = engine.stop();
+
+    expect(await settlesWithin(stopped, 50)).toBe(true);
+    await expect(stopped).resolves.toBeUndefined();
+    expect(checkAborted).toHaveBeenCalledTimes(1);
+    expect(store.calls.removed).toEqual([]);
+  });
+
+  test('stop() does not hang on a scheduled action that ignores cancellation', async () => {
+    const store = trackingStore();
+    const clock = createManualClock(0);
+    const actionStarted = vi.fn();
+
+    const act = scheduledAction('sched-act')
+      .args(z.object({}))
+      .fn(async () => {
+        actionStarted();
+        await new Promise<void>(() => {});
+      });
+    const r = rule('r')
+      .on('issues.closed')
+      .when(() => true)
+      .schedule({
+        delay: 0,
+        key: () => 'k',
+        transform: () => ({}),
+        check: async () => ({ kind: 'pass' }),
+      })
+      .action('sched-act');
+    const engine = createEngine({ scheduledStore: store, clock, evaluationTimeoutMs: 60_000 });
+    engine.register({ scheduledActions: [act({})], rules: [r()] });
+    engine.start();
+
+    await engine.evaluate(fakeEnvelope('issues.closed'));
+    clock.advance(10_000);
+    await flushScheduler();
+    expect(actionStarted).toHaveBeenCalledTimes(1);
+
+    const stopped = engine.stop();
+
+    expect(await settlesWithin(stopped, 50)).toBe(true);
+    await expect(stopped).resolves.toBeUndefined();
+    expect(store.calls.removed).toEqual([]);
+  });
+
+  test('scheduled action timeout releases the worker and keeps the record for retry', async () => {
+    const store = trackingStore();
+    const clock = createManualClock(0);
+    const actionStarted = vi.fn();
+    const failures: unknown[] = [];
+
+    const act = scheduledAction('sched-act')
+      .args(z.object({}))
+      .fn(async () => {
+        actionStarted();
+        await new Promise<void>(() => {});
+      });
+    const r = rule('r')
+      .on('issues.closed')
+      .when(() => true)
+      .schedule({
+        delay: 0,
+        key: () => 'k',
+        transform: () => ({}),
+        check: async () => ({ kind: 'pass' }),
+      })
+      .action('sched-act');
+    const engine = createEngine({ scheduledStore: store, clock, evaluationTimeoutMs: 10 });
+    engine.on('evaluation.failed', (event) => failures.push(event.error));
+    engine.register({ scheduledActions: [act({})], rules: [r()] });
+    engine.start();
+
+    await engine.evaluate(fakeEnvelope('issues.closed'));
+    clock.advance(10_000);
+    await flushScheduler();
+    expect(actionStarted).toHaveBeenCalledTimes(1);
+
+    clock.advance(10);
+    await flushScheduler();
+    await flushScheduler();
+
+    expect(failures.length).toBe(1);
+    expect(store.calls.removed).toEqual([]);
+
+    const stopped = engine.stop();
+    expect(await settlesWithin(stopped, 50)).toBe(true);
+    await expect(stopped).resolves.toBeUndefined();
   });
 });
 

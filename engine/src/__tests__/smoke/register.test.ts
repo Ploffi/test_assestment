@@ -214,6 +214,33 @@ describe('engine.register — failure: dependency graph (pass 1)', () => {
     ).toBe(true);
   });
 
+  test('when-depth-exceeded when `.when(...)` tree is deeper than 30 nodes', () => {
+    let node: any = use('touches_paths', { glob: 'src/**' });
+    for (let i = 0; i < 30; i++) node = not(node);
+
+    const deep = rule('too-deep')
+      .on('push')
+      .when(node)
+      .action('notify-slack');
+
+    const engine = createEngine();
+    let caught: unknown;
+    try {
+      engine.register({
+        predicates: [touchesPaths()],
+        actions: [notifySlack({ channel: '#general' })],
+        rules: [deep()],
+      });
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(caught).toBeInstanceOf(RegistrationError);
+    expect(
+      (caught as RegistrationError).issues.some((i) => i.code === 'when-depth-exceeded'),
+    ).toBe(true);
+  });
+
   test('missing-aggregated-action when a rule has `.aggregate(...)` but none attached', () => {
     const bareAggRule = rule('bare-agg')
       .on('push')

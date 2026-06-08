@@ -20,6 +20,7 @@ import {
   type RegistrationIssue,
 } from '../public/register.js';
 import { buildAdapter } from './adapter.js';
+import { WHEN_TREE_MAX_DEPTH } from './predicates.js';
 
 export interface BuildRegistryOptions {
   clock: Clock;
@@ -83,7 +84,15 @@ export function buildRegistry(batch: RegisterBatch, opts: BuildRegistryOptions):
   // Pass 1: dependency graph + cross-references
   for (const r of reg.rules.values()) {
     // Walk when tree for use(name)
-    const checkUse = (n: WhenNode<any, any>) => {
+    const checkUse = (n: WhenNode<any, any>, depth = 1) => {
+      if (depth > WHEN_TREE_MAX_DEPTH) {
+        issues.push({
+          code: 'when-depth-exceeded',
+          entity: { kind: 'rule', name: r.name },
+          message: `rule "${r.name}" .when(...) tree exceeds max depth ${WHEN_TREE_MAX_DEPTH}`,
+        });
+        return;
+      }
       if (typeof n === 'function') return;
       if ('kind' in n) {
         if (n.kind === 'use') {
@@ -97,9 +106,9 @@ export function buildRegistry(batch: RegisterBatch, opts: BuildRegistryOptions):
             });
           }
         } else if (n.kind === 'all' || n.kind === 'any') {
-          for (const c of (n as AllNode<any, any> | AnyNode<any, any>).children) checkUse(c);
+          for (const c of (n as AllNode<any, any> | AnyNode<any, any>).children) checkUse(c, depth + 1);
         } else if (n.kind === 'not') {
-          checkUse((n as NotNode<any, any>).child);
+          checkUse((n as NotNode<any, any>).child, depth + 1);
         }
       }
     };

@@ -41,19 +41,28 @@ export class CancellationScope {
   }
 
   async run<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    throwIfAborted(this.signal);
+
+    let onAbort: (() => void) | null = null;
     const abortPromise = new Promise<never>((_, reject) => {
-      if (this.signal.aborted) {
-        reject(new Error('aborted'));
-        return;
-      }
-      this.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      onAbort = () => reject(signalAbortError(this.signal));
+      this.signal.addEventListener('abort', onAbort, { once: true });
     });
     abortPromise.catch(() => {});
 
-    const mainPromise = work(this.signal);
+    let mainPromise: Promise<T>;
+    try {
+      mainPromise = Promise.resolve(work(this.signal));
+    } catch (err) {
+      mainPromise = Promise.reject(err);
+    }
     mainPromise.catch(() => {});
 
-    return Promise.race([mainPromise, abortPromise]);
+    try {
+      return await Promise.race([mainPromise, abortPromise]);
+    } finally {
+      if (onAbort) this.signal.removeEventListener('abort', onAbort);
+    }
   }
 
   dispose(): void {
@@ -65,8 +74,12 @@ export class CancellationScope {
   }
 }
 
+function signalAbortError(signal: AbortSignal): Error {
+  const reason = signal.reason;
+  return reason instanceof Error ? reason : new Error('aborted');
+}
+
 export function throwIfAborted(signal: AbortSignal): void {
   if (!signal.aborted) return;
-  const reason = signal.reason;
-  throw reason instanceof Error ? reason : new Error('aborted');
+  throw signalAbortError(signal);
 }

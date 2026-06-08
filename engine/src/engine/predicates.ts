@@ -13,6 +13,8 @@ import type {
 import type { PredicateEvaluatedEvent } from '../public/emitter.js';
 import { canonicalJson } from './utility/canonical.js';
 
+export const WHEN_TREE_MAX_DEPTH = 30;
+
 export interface EvaluateWhenOptions {
   node: WhenNode<any, any>;
   ctx: BaseCtx<AnyEventPayload, any>;
@@ -24,13 +26,15 @@ export interface EvaluateWhenOptions {
 }
 
 export function evaluateWhen(opts: EvaluateWhenOptions): Promise<boolean> {
-  return evaluateNode(opts.node, opts);
+  return evaluateNode(opts.node, opts, 1);
 }
 
 async function evaluateNode(
   node: WhenNode<any, any>,
   opts: EvaluateWhenOptions,
+  depth: number,
 ): Promise<boolean> {
+  if (depth > WHEN_TREE_MAX_DEPTH) return false;
   if (typeof node === 'function') {
     try {
       return !!(await (node as (c: any) => boolean | Promise<boolean>)(opts.ctx));
@@ -39,22 +43,23 @@ async function evaluateNode(
     }
   }
   if ('kind' in node) {
+    if (node.kind !== 'use' && depth >= WHEN_TREE_MAX_DEPTH) return false;
     if (node.kind === 'all') {
       for (const c of (node as AllNode<any, any>).children) {
-        const v = await evaluateNode(c, opts);
+        const v = await evaluateNode(c, opts, depth + 1);
         if (!v) return false;
       }
       return true;
     }
     if (node.kind === 'any') {
       for (const c of (node as AnyNode<any, any>).children) {
-        const v = await evaluateNode(c, opts);
+        const v = await evaluateNode(c, opts, depth + 1);
         if (v) return true;
       }
       return false;
     }
     if (node.kind === 'not') {
-      const v = await evaluateNode((node as NotNode<any, any>).child, opts);
+      const v = await evaluateNode((node as NotNode<any, any>).child, opts, depth + 1);
       return !v;
     }
     if (node.kind === 'use') {

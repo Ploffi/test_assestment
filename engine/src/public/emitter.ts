@@ -17,7 +17,7 @@ export type RuleSkipReason =
   | 'scheduled-enqueued';
 
 /** Outcome of a scheduled-rule `check`, as observed by the scheduler. */
-export type ScheduledOutcome = 'pass' | 'skip' | 'recheck' | 'deadline_exceeded';
+export type ScheduledOutcome = 'pass' | 'skip' | 'recheck' | 'deadline_exceeded' | 'max_attempts_exceeded';
 
 export interface RuleMatchedEvent {
   deliveryId: string;

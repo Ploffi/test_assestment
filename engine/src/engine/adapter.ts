@@ -24,7 +24,16 @@ interface CacheEntry {
   expiresAt: number;
 }
 
+interface SemaphoreWaiter {
+  resolve(release: () => void): void;
+  reject(err: unknown): void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+}
+
 type BreakerState = 'closed' | 'open' | 'half-open';
+
+const DEFAULT_CACHE_MAX = 10_000;
 
 export function attachIntegrationCallContext<T>(
   input: T,
@@ -42,7 +51,7 @@ export function attachIntegrationCallContext<T>(
 
 function sleep(clock: Clock, ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) return Promise.resolve();
-  if (signal?.aborted) return Promise.reject(new Error('aborted'));
+  if (signal?.aborted) return Promise.reject(signalAbortError(signal));
   return new Promise((resolve, reject) => {
     const timer = clock.setTimeout(() => {
       signal?.removeEventListener('abort', onAbort);
@@ -50,10 +59,15 @@ function sleep(clock: Clock, ms: number, signal?: AbortSignal): Promise<void> {
     }, ms);
     const onAbort = () => {
       timer.cancel();
-      reject(new Error('aborted'));
+      reject(signalAbortError(signal));
     };
     signal?.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+function signalAbortError(signal?: AbortSignal): Error {
+  const reason = signal?.reason;
+  return reason instanceof Error ? reason : new Error('aborted');
 }
 
 export function buildAdapter(
@@ -62,32 +76,70 @@ export function buildAdapter(
 ): IntegrationAdapter<IntegrationMethods> {
   const cache = integ.cache ? new Map<string, CacheEntry>() : null;
   const cacheTtlMs = integ.cache ? parseDuration(integ.cache.ttl) : 0;
-  const cacheMax = integ.cache?.max ?? Number.POSITIVE_INFINITY;
+  const cacheMax = integ.cache?.max ?? DEFAULT_CACHE_MAX;
   const concurrency = integ.concurrency === undefined
     ? Number.POSITIVE_INFINITY
     : Math.max(1, Math.floor(integ.concurrency));
   let active = 0;
-  const waiters: Array<() => void> = [];
+  const waiters: SemaphoreWaiter[] = [];
 
   let breakerState: BreakerState = 'closed';
   let breakerOpenedAt = 0;
   let successes = 0;
   let failures = 0;
 
-  const acquire = async (): Promise<() => void> => {
-    if (active < concurrency) {
-      active++;
-      return release;
+  const cleanupWaiter = (waiter: SemaphoreWaiter): void => {
+    if (waiter.signal && waiter.onAbort) {
+      waiter.signal.removeEventListener('abort', waiter.onAbort);
+      waiter.onAbort = undefined;
     }
-    await new Promise<void>((resolve) => waiters.push(resolve));
-    active++;
-    return release;
   };
 
-  const release = (): void => {
-    active--;
-    const next = waiters.shift();
-    if (next) next();
+  const removeWaiter = (waiter: SemaphoreWaiter): void => {
+    const idx = waiters.indexOf(waiter);
+    if (idx >= 0) waiters.splice(idx, 1);
+  };
+
+  const createRelease = (): (() => void) => {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+
+      while (waiters.length > 0) {
+        const next = waiters.shift()!;
+        cleanupWaiter(next);
+        if (next.signal?.aborted) {
+          next.reject(signalAbortError(next.signal));
+          continue;
+        }
+        next.resolve(createRelease());
+        return;
+      }
+
+      active--;
+    };
+  };
+
+  const acquire = async (signal?: AbortSignal): Promise<() => void> => {
+    if (active < concurrency) {
+      active++;
+      return createRelease();
+    }
+    if (signal?.aborted) throw signalAbortError(signal);
+
+    return new Promise<() => void>((resolve, reject) => {
+      const waiter: SemaphoreWaiter = { resolve, reject, signal };
+      if (signal) {
+        waiter.onAbort = () => {
+          removeWaiter(waiter);
+          cleanupWaiter(waiter);
+          reject(signalAbortError(signal));
+        };
+        signal.addEventListener('abort', waiter.onAbort, { once: true });
+      }
+      waiters.push(waiter);
+    });
   };
 
   const openBreaker = (): void => {
@@ -152,7 +204,7 @@ export function buildAdapter(
     fn: (input: any) => Promise<any>,
     input: any,
   ): Promise<any> => {
-    const releaseSemaphore = await acquire();
+    const releaseSemaphore = await acquire(input?.signal);
     try {
       beforeBreakerCall();
       try {
